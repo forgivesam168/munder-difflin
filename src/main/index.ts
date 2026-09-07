@@ -8,6 +8,8 @@ import {
 import { randomBytes, createHash, timingSafeEqual } from 'node:crypto';
 import { join, resolve, sep, basename, dirname, isAbsolute } from 'node:path';
 import { homedir } from 'node:os';
+import { pathToFileURL } from 'node:url';
+import { isRendererDocument, isTrustedRendererIpc, rendererPermissionAllowed } from './browserSecurity';
 import { request as httpsRequest } from 'node:https';
 import { PtyManager, type SpawnOptions } from './pty';
 import { resolveCommand as resolveCliCommand, isSafeCommandName } from './shellEnv';
@@ -92,6 +94,9 @@ import {
 } from '../shared/codexRemote';
 
 const isDev = !!process.env.ELECTRON_RENDERER_URL;
+const rendererDocumentUrl = isDev && process.env.ELECTRON_RENDERER_URL
+  ? process.env.ELECTRON_RENDERER_URL
+  : pathToFileURL(join(__dirname, '../renderer/index.html')).href;
 
 // Keep the main process alive on an unexpected throw/rejection. The harness is a
 // multi-agent supervisor — a single stray throw (e.g. node-pty's ConPTY console
@@ -2261,33 +2266,25 @@ function createWindow(opts: { floor?: boolean } = {}): BrowserWindow {
   win.on('focus', () => { mainWindow = win; });
   if (!isFloor) mainWindow = win;
 
-  // Permission gate for the renderer (our own trusted, local content). The only
-  // permission we constrain is microphone capture: it's allowed ONLY while a mic
-  // feature is actually live — Free Flow dictation (`freeflowEnabled`) OR a
-  // Realtime Michael voice session (`realtimeVoiceEnabled`, flipped on by the
-  // session at start() before getUserMedia, off at stop()). With both flags off,
-  // there's zero mic access even at the Electron layer. We deliberately do NOT
-  // gate on OpenAI-key presence: that key (`apikey:openai`) is shared with the CLI
-  // engines, so a CLI-only user must not have the mic gate opened. Every other
-  // permission keeps the app's prior permissive behavior (e.g. clipboard for
-  // xterm/editor copy must keep working).
+  // Only our top-level document receives the small set of web permissions the
+  // app uses. Release iframes and navigated external content receive none.
+  const trustedPermissionRequest = (requester: Electron.WebContents | null, url: string | undefined, mainFrame: boolean): boolean =>
+    requester !== null && [...allWindows].some(w => !w.isDestroyed() && w.webContents === requester)
+    && isRendererDocument(url, rendererDocumentUrl, mainFrame);
   const micFeatureLive = (): boolean => {
     const cfg = readConfig();
     return cfg.freeflowEnabled === true || cfg.realtimeVoiceEnabled === true;
   };
   const ses = win.webContents.session;
-  ses.setPermissionRequestHandler((_wc, permission, callback, details) => {
-    if (permission === 'media') {
-      const mediaTypes = details && 'mediaTypes' in details ? details.mediaTypes : undefined;
-      const wantsAudio = !mediaTypes || mediaTypes.includes('audio');
-      callback(micFeatureLive() && wantsAudio);
-      return;
-    }
-    callback(true);
+  ses.setPermissionRequestHandler((requester, permission, callback, details) => {
+    callback(rendererPermissionAllowed(permission,
+      trustedPermissionRequest(requester, details.requestingUrl, details.isMainFrame),
+      micFeatureLive(), 'mediaTypes' in details ? details.mediaTypes : []));
   });
-  ses.setPermissionCheckHandler((_wc, permission) => {
-    if (permission === 'media') return micFeatureLive();
-    return true;
+  ses.setPermissionCheckHandler((requester, permission, _origin, details) => {
+    return rendererPermissionAllowed(permission,
+      trustedPermissionRequest(requester, details.requestingUrl, details.isMainFrame),
+      micFeatureLive(), details.mediaType ? [details.mediaType] : []);
   });
 
   // Only the primary persists geometry (kv `window.bounds`); floors cascade
@@ -3232,12 +3229,24 @@ ipcMain.handle('config:changeHome', async (_evt, payload: unknown) => {
   return { ok: true as const }; // unreachable (process exits) — typed for the renderer
 });
 
-// ─── IPC: filesystem (sandboxed to a root) ──────────────────────────────────
-ipcMain.handle('fs:listDir', (_evt, root: unknown, rel: unknown) => {
+// Sender authentication is independent of root authorization. Registered paths
+// are still renderer-mutable; do not mistake this gate for an approved root grant.
+function handleProjectIpc(channel: string, listener: Parameters<typeof ipcMain.handle>[1]): void {
+  ipcMain.handle(channel, (event, ...args) => {
+    const ownedSender = [...allWindows].some(w => !w.isDestroyed() && w.webContents === event.sender);
+    if (!isTrustedRendererIpc(event, rendererDocumentUrl, ownedSender)) {
+      throw new Error('Untrusted project IPC sender');
+    }
+    return listener(event, ...args);
+  });
+}
+
+// ─── IPC: filesystem (path containment; root authorization remains separate) ──
+handleProjectIpc('fs:listDir', (_evt, root: unknown, rel: unknown) => {
   if (typeof root !== 'string' || typeof rel !== 'string') return { ok: false, error: 'invalid args' };
   return listDir(root, rel);
 });
-ipcMain.handle('fs:readFile', (_evt, root: unknown, rel: unknown) => {
+handleProjectIpc('fs:readFile', (_evt, root: unknown, rel: unknown) => {
   if (typeof root !== 'string' || typeof rel !== 'string') return { ok: false, error: 'invalid args' };
   return readFileText(root, rel);
 });
@@ -3245,18 +3254,18 @@ ipcMain.handle('fs:readFile', (_evt, root: unknown, rel: unknown) => {
 // load them off disk itself — the CSP has no `file:` source and no file
 // protocol is registered — so the bytes come through here and become a `blob:`
 // URL on the other side. Same root confinement as every other fs handler.
-ipcMain.handle('fs:readBinary', (_evt, root: unknown, rel: unknown) => {
+handleProjectIpc('fs:readBinary', (_evt, root: unknown, rel: unknown) => {
   if (typeof root !== 'string' || typeof rel !== 'string') return { ok: false, error: 'invalid args' };
   return readFileBinary(root, rel);
 });
-ipcMain.handle('fs:writeFile', (_evt, root: unknown, rel: unknown, content: unknown) => {
+handleProjectIpc('fs:writeFile', (_evt, root: unknown, rel: unknown, content: unknown) => {
   if (typeof root !== 'string' || typeof rel !== 'string' || typeof content !== 'string') {
     return { ok: false, error: 'invalid args' };
   }
   return writeFileText(root, rel, content);
 });
 // v0.3.4: existence check for the terminal ⌘-click markdown flow (metadata only).
-ipcMain.handle('fs:statAbs', (_evt, p: unknown) => {
+handleProjectIpc('fs:statAbs', (_evt, p: unknown) => {
   if (typeof p !== 'string' || p.length > 4096 || p.includes('\0')) {
     return { exists: false, isFile: false, path: '' };
   }
@@ -3278,7 +3287,7 @@ ipcMain.handle('fs:statAbs', (_evt, p: unknown) => {
  *  one — a directory has no default application to launch, so the execution
  *  argument above does not apply, and revealing a folder inside its parent is
  *  not what "open this folder" means to anyone. */
-ipcMain.handle('fs:revealPath', async (_evt, p: unknown) => {
+handleProjectIpc('fs:revealPath', async (_evt, p: unknown) => {
   if (typeof p !== 'string' || !p.length || p.length > 4096 || p.includes('\0')) {
     return { ok: false, error: 'bad request' };
   }
@@ -3290,72 +3299,72 @@ ipcMain.handle('fs:revealPath', async (_evt, p: unknown) => {
 });
 
 // ─── IPC: git ───────────────────────────────────────────────────────────────
-ipcMain.handle('git:isRepo', (_evt, cwd: unknown) => {
+handleProjectIpc('git:isRepo', (_evt, cwd: unknown) => {
   if (typeof cwd !== 'string') return false;
   return isRepo(cwd);
 });
 
 // The repo a cwd belongs to, following a linked worktree back to its main
 // checkout — the renderer groups the agent roster by this.
-ipcMain.handle('git:mainRepo', (_evt, cwd: unknown) => {
+handleProjectIpc('git:mainRepo', (_evt, cwd: unknown) => {
   if (typeof cwd !== 'string' || !cwd) return null;
   return mainRepoRoot(cwd);
 });
-ipcMain.handle('git:branch', (_evt, cwd: unknown) => {
+handleProjectIpc('git:branch', (_evt, cwd: unknown) => {
   if (typeof cwd !== 'string') return { error: 'invalid cwd' };
   return getBranch(cwd);
 });
-ipcMain.handle('git:status', (_evt, cwd: unknown) => {
+handleProjectIpc('git:status', (_evt, cwd: unknown) => {
   if (typeof cwd !== 'string') return { error: 'invalid cwd' };
   return getStatus(cwd);
 });
-ipcMain.handle('git:log', (_evt, cwd: unknown, n: unknown) => {
+handleProjectIpc('git:log', (_evt, cwd: unknown, n: unknown) => {
   if (typeof cwd !== 'string') return { error: 'invalid cwd' };
   const count = typeof n === 'number' ? Math.min(500, Math.max(1, n)) : 50;
   return getLog(cwd, count);
 });
-ipcMain.handle('git:branches', (_evt, cwd: unknown) => {
+handleProjectIpc('git:branches', (_evt, cwd: unknown) => {
   if (typeof cwd !== 'string') return { error: 'invalid cwd' };
   return getBranches(cwd);
 });
-ipcMain.handle('git:aheadBehind', (_evt, cwd: unknown) => {
+handleProjectIpc('git:aheadBehind', (_evt, cwd: unknown) => {
   if (typeof cwd !== 'string') return { error: 'invalid cwd' };
   return getAheadBehind(cwd);
 });
-ipcMain.handle('git:diff', (_evt, cwd: unknown, relPath: unknown) => {
+handleProjectIpc('git:diff', (_evt, cwd: unknown, relPath: unknown) => {
   if (typeof cwd !== 'string' || typeof relPath !== 'string') {
     return { ok: false, error: 'invalid args' };
   }
   return getDiff(cwd, relPath);
 });
 // ─── v0.3.4: history / compare / checkout (git visualization) ───────────────
-ipcMain.handle('git:logGraph', (_evt, cwd: unknown, n: unknown, skip: unknown) => {
+handleProjectIpc('git:logGraph', (_evt, cwd: unknown, n: unknown, skip: unknown) => {
   if (typeof cwd !== 'string') return { error: 'invalid args' };
   const count = Math.min(500, Math.max(1, typeof n === 'number' ? n : 200));
   const off = Math.max(0, typeof skip === 'number' ? skip : 0);
   return getLogGraph(cwd, count, off);
 });
-ipcMain.handle('git:commitFiles', (_evt, cwd: unknown, sha: unknown) => {
+handleProjectIpc('git:commitFiles', (_evt, cwd: unknown, sha: unknown) => {
   if (typeof cwd !== 'string' || typeof sha !== 'string') return { error: 'invalid args' };
   return getCommitFiles(cwd, sha);
 });
-ipcMain.handle('git:showFile', (_evt, cwd: unknown, rev: unknown, relPath: unknown) => {
+handleProjectIpc('git:showFile', (_evt, cwd: unknown, rev: unknown, relPath: unknown) => {
   if (typeof cwd !== 'string' || typeof rev !== 'string' || typeof relPath !== 'string') {
     return { ok: false, error: 'invalid args' };
   }
   return getFileAtRev(cwd, rev, relPath);
 });
-ipcMain.handle('git:compareRefs', (_evt, cwd: unknown, base: unknown, head: unknown, mode: unknown) => {
+handleProjectIpc('git:compareRefs', (_evt, cwd: unknown, base: unknown, head: unknown, mode: unknown) => {
   if (typeof cwd !== 'string' || typeof base !== 'string' || typeof head !== 'string') {
     return { error: 'invalid args' };
   }
   return compareRefs(cwd, base, head, mode === 'two' ? 'two' : 'three');
 });
-ipcMain.handle('git:worktrees', (_evt, cwd: unknown) => {
+handleProjectIpc('git:worktrees', (_evt, cwd: unknown) => {
   if (typeof cwd !== 'string') return { error: 'invalid args' };
   return listWorktrees(cwd);
 });
-ipcMain.handle('git:checkout', async (_evt, cwd: unknown, ref: unknown, detach: unknown) => {
+handleProjectIpc('git:checkout', async (_evt, cwd: unknown, ref: unknown, detach: unknown) => {
   if (typeof cwd !== 'string' || typeof ref !== 'string') return { ok: false, error: 'invalid args' };
   // Guard: never swap files under an actively-working agent. Objective signal
   // owned by main — any live pty whose cwd sits in this tree and emitted output
