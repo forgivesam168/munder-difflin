@@ -45,6 +45,11 @@ import { reduceStatus, clampPercent, isNewer, installerUrl, shouldShowReleaseDro
  */
 
 const REPO = 'chaitanyagiri/munder-difflin';
+// This research fork has no approved update channel. Keep exact-artifact runs
+// independent of upstream releases, even with an existing autoUpdate=true
+// config. Re-enabling requires a reviewed source/channel and artifact policy.
+const UPDATES_ENABLED = false;
+const UPDATES_DISABLED_REASON = 'Updates are disabled in this research build; no update channel is approved.';
 const CHECK_INTERVAL_MS = 6 * 60 * 60 * 1000; // 6h
 const FALLBACK_CACHE_MS = 60 * 60 * 1000;     // 1h between releases/latest polls
 
@@ -364,6 +369,16 @@ its first newline.
 - **Agent terminals are UTF-8.** They ran with no locale at all.`;
 
 export function initAutoUpdater(getWebContents: () => WebContents | null): void {
+  if (!UPDATES_ENABLED) {
+    for (const channel of [
+      'update:restartAndInstall', 'update:checkNow', 'update:download',
+      'update:openRelease', 'update:simulate'
+    ]) {
+      ipcMain.handle(channel, () => ({ ok: false, error: UPDATES_DISABLED_REASON }));
+    }
+    ipcMain.handle('update:current', () => ({ state: 'error', message: UPDATES_DISABLED_REASON }));
+    return;
+  }
   sendTo = getWebContents;
 
   // IPC surface is registered unconditionally so the renderer can always call it.

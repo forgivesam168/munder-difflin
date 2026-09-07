@@ -18,6 +18,55 @@ const { readFileSync } = require('node:fs');
 const { join } = require('node:path');
 const read = (rel) => readFileSync(join(__dirname, '..', rel), 'utf8');
 
+test('research updater denies every action without timers, network, files or native updater loading', async () => {
+  const ts = require('typescript');
+  const vm = require('node:vm');
+  const source = ts.transpileModule(read('src/main/updater.ts'), {
+    compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 }
+  }).outputText;
+  for (const { packaged, preview } of [false, true].flatMap(packaged =>
+    [false, true].map(preview => ({ packaged, preview })))) {
+    const handlers = new Map();
+    const effects = [];
+    const forbidden = (name) => (...args) => { effects.push(name); throw new Error(`Forbidden effect: ${name}`); };
+    const mod = { exports: {} };
+    const sandbox = {
+      module: mod, exports: mod.exports,
+      process: { platform: 'win32', arch: 'x64', env: preview ? { MD_DROP_PREVIEW: 'untrusted-preview.md' } : {} },
+      console, setTimeout: forbidden('timer'), setInterval: forbidden('interval'), clearTimeout() {},
+      require(id) {
+        if (id === 'electron') return {
+          app: { isPackaged: packaged, getPath: forbidden('userData'), getVersion: () => '0.4.6' },
+          ipcMain: { handle: (channel, fn) => handlers.set(channel, fn) },
+          shell: { openExternal: forbidden('external URL') }
+        };
+        if (id === './config') return { readConfig: () => ({ autoUpdate: true }) };
+        if (id === 'node:https') return { request: forbidden('network') };
+        if (id === 'node:fs') return new Proxy({}, { get: (_, key) => forbidden(`fs:${String(key)}`) });
+        if (id === 'node:path') return require('node:path');
+        if (id === '../shared/releaseDrop') return { DEFAULT_DROP_HTML: '' };
+        if (id === '../shared/updateState') return require('./load-ts.cjs')('src/shared/updateState.ts');
+        effects.push(`module:${id}`);
+        throw new Error(`Unexpected module: ${id}`);
+      }
+    };
+    vm.runInNewContext(source, sandbox, { filename: 'updater.cjs' });
+    mod.exports.initAutoUpdater(forbidden('renderer accessor'));
+    const actions = ['update:restartAndInstall', 'update:checkNow', 'update:download',
+      'update:openRelease', 'update:simulate'];
+    assert.equal(handlers.size, actions.length + 1);
+    for (const channel of actions) {
+      const result = await handlers.get(channel)({}, 'https://github.com/chaitanyagiri/munder-difflin/releases/latest');
+      assert.equal(result.ok, false);
+      assert.match(result.error, /no update channel is approved/);
+    }
+    assert.equal(handlers.get('update:current')().state, 'error');
+    mod.exports.abortPendingRestart();
+    await Promise.resolve();
+    assert.deepEqual(effects, [], `packaged=${packaged}, preview=${preview}`);
+  }
+});
+
 test('runCheck wraps the native check in a timeout, not a bare await', () => {
   const src = read('src/main/updater.ts');
   const runCheck = src.slice(src.indexOf('async function runCheck'), src.indexOf('async function runCheck') + 900);
