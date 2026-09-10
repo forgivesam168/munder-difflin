@@ -40,8 +40,9 @@ much cheaper than finding out in review.
   Linux builds, ship from the [releases page](https://github.com/chaitanyagiri/munder-difflin/releases/latest).
   Cross-platform smoke-testing and fixes are still very welcome (see
   [Good first areas](#good-first-areas)).
-- **Node.js 18+** and npm.
-- A **C/C++ toolchain** to build `node-pty`'s native addon. On macOS:
+- **Node.js 22.14+** and npm; CI uses Node.js 24. SQLite requires Node-API 10.
+- A **C/C++ toolchain** when rebuilding native addons (macOS/Linux or explicit
+  source builds; normal Windows x64 setup uses verified prebuilds). On macOS:
   ```bash
   xcode-select --install
   ```
@@ -54,16 +55,50 @@ much cheaper than finding out in review.
 ```bash
 git clone <your-fork-url> munder-difflin
 cd munder-difflin
-npm install        # postinstall rebuilds node-pty against Electron's ABI
+npm install        # postinstall validates/rebuilds native dependencies for the host
 npm run dev        # live-reloading Electron build
 ```
 
+The research dependency set uses Electron 43 and better-sqlite3 13. SQLite ships
+platform prebuilds; Windows postinstall validates both native bindings and applies
+the PTY lifecycle guards without requiring a compiler. Other platforms retain
+the node-pty rebuild for Electron. Electron's
+binary is downloaded on first CLI use (or explicitly with `npx install-electron`).
+For controlled installs, acquire packages with `npm ci --ignore-scripts`, inspect
+the lifecycle effects, then run the required native setup separately. Set
+`TUNNELMOLE_TELEMETRY=0` in the installation environment to disable its install
+telemetry; CI and release builds set this explicitly.
+
+This research branch also normalizes Tunnelmole 2.4.0's redundant self-dependency
+metadata during setup. The version-checked helper invalidates only npm's generated
+`node_modules/.package-lock.json` cache; the root lockfile retains registry
+provenance. Packaging reapplies normalization after dependency preparation and
+before collection. For standalone dependency inspection after an npm operation,
+run `node tools/patch-tunnelmole-metadata.cjs` first.
+Hono is explicit and WebSocket 8 is an explicit optional dependency to keep the
+MCP/OpenAI dependency graph complete under npm 11.6.2; Tunnelmole retains its
+separate WebSocket 7. These entries resolve observed missing/invalid dependencies,
+not additional application features. Verify with
+`npm list -a --include prod --include optional --omit dev` after installation;
+an install exit code alone did not catch this failure.
+
+`npm run dist:win` and the Windows release job select `electron-builder.win.yml`.
+This Windows x64 profile validates the prebuilds without a compiler and retains
+automatic production dependency copying. Other targets use the base
+`electron-builder.yml` rebuild path, including each macOS universal slice.
+Generic `npm run dist` also uses that base configuration; on Windows use
+`dist:win` for the verified prebuild path. The Windows profile rejects unsupported
+host/target combinations and `npm_config_build_from_source=true`; use the base
+configuration for an explicit source build, which remains unverified in this POC.
+Verify the packaged executable and its own native dependencies with
+`node tools/research-run.cjs test/native-modules.electron.test.cjs <win-unpacked-dir>`.
+This test does not start the full application or establish release readiness.
+
 > [!IMPORTANT]
 > **The most common setup failure is the native `node-pty` rebuild.** The
-> `postinstall` script runs `electron-rebuild` so `node-pty` matches Electron's
-> ABI. If you see a "wrong ELF/Mach-O" or "NODE_MODULE_VERSION" error at launch,
-> re-run `npm install` (which re-triggers `postinstall`) after confirming your
-> C/C++ toolchain is installed.
+> Source-build setup uses `electron-rebuild`. If you see a "wrong ELF/Mach-O"
+> or "NODE_MODULE_VERSION" error, verify the host/target architecture and rerun
+> native setup. Source-build paths also require the platform C/C++ toolchain.
 
 ## Evidence is mandatory
 

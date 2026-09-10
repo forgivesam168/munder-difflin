@@ -81,8 +81,10 @@ asarUnpack:
   # better-sqlite3 is native (bindings/prebuild need the .node on the real FS).
   - "**/node_modules/better-sqlite3/**"
 
-# Rebuild native deps (node-pty) for the target during packaging.
+# Windows x64 validates the shipped Node-API prebuilds. Other targets retain
+# builder's rebuild behavior; normalize package metadata after either path.
 npmRebuild: true
+afterExtract: ./build/native-dependencies.cjs
 
 # ---- macOS ----
 mac:

@@ -1,0 +1,5 @@
+# Explicit Windows x64 profile: skip recompilation but retain builder's normal
+# production dependency collection. beforeBuild=false would suppress copying.
+extends: ./electron-builder.yml
+npmRebuild: false
+beforePack: ./build/native-dependencies.cjs

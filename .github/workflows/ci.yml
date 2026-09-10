@@ -1,5 +1,8 @@
 name: CI
 
+env:
+  TUNNELMOLE_TELEMETRY: '0'
+
 on:
   push:
     branches: [main, 'release/**']
@@ -14,7 +17,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
-          node-version: 20
+          node-version: 24
           cache: npm
       - name: Install dependencies
         run: npm ci
@@ -36,7 +39,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
-          node-version: 20
+          node-version: 24
           cache: npm
       - run: npm ci
       - run: npm run build

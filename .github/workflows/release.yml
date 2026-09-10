@@ -1,5 +1,8 @@
 name: Release
 
+env:
+  TUNNELMOLE_TELEMETRY: '0'
+
 # Build installers for every platform and publish them to a GitHub Release
 # whenever a v* tag is pushed. Run manually (workflow_dispatch) to dry-build
 # without publishing.
@@ -23,7 +26,7 @@ jobs:
           - os: macos-latest
             args: --mac
           - os: windows-2022
-            args: --win
+            args: --win --config electron-builder.win.yml
           - os: ubuntu-latest
             args: --linux
     steps:
@@ -31,7 +34,7 @@ jobs:
 
       - uses: actions/setup-node@v4
         with:
-          node-version: 20
+          node-version: 24
           cache: npm
 
       # node-gyp (used to rebuild native node-pty) imports distutils, which was
