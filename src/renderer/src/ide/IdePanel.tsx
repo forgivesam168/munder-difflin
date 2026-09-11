@@ -106,6 +106,8 @@ export function IdePanel() {
 
   const [isRepo, setIsRepo] = useState<boolean | null>(null);
   const [status, setStatus] = useState<GitStatusT | null>(null);
+  const [gitError, setGitError] = useState<string | null>(null);
+  const gitRefreshPending = useRef(false);
   const [treeWidth, setTreeWidth] = useState(300);
   // v0.3.4 git visualization: which rail pane is showing, and the repo's MAIN
   // root (a worktree's history/compare must run against the shared repo).
@@ -130,12 +132,6 @@ export function IdePanel() {
     });
   };
   const [gitRoot, setGitRoot] = useState<string | null>(null);
-  useEffect(() => {
-    if (!root) return;
-    let alive = true;
-    void window.cth.gitMainRepo(root).then((r) => { if (alive) setGitRoot(r ?? root); });
-    return () => { alive = false; };
-  }, [root]);
   // Per-markdown-tab view mode (code | split | preview); changing it also
   // updates the sticky default for the next markdown file.
   const [mdViews, setMdViews] = useState<Record<string, MdView>>({});
@@ -285,12 +281,23 @@ export function IdePanel() {
 
   // ─── Git status (changed files) ───────────────────────────────────────────
   const refreshStatus = useCallback(async () => {
-    if (!root) { setIsRepo(false); return; }
-    const repo = await window.cth.gitIsRepo(root);
-    setIsRepo(repo);
-    if (!repo) { setStatus(null); return; }
-    const s = await window.cth.gitStatus(root);
-    if (!('error' in s)) setStatus(s as GitStatusT);
+    if (gitRefreshPending.current) return;
+    gitRefreshPending.current = true;
+    try {
+      if (!root || !await window.cth.gitIsRepo(root)) {
+        setIsRepo(false); setStatus(null); setGitRoot(null); setGitError(null);
+        return;
+      }
+      const repoRoot = await window.cth.gitMainRepo(root);
+      const nextStatus = await window.cth.gitStatus(root);
+      if ('error' in nextStatus) throw new Error(nextStatus.error);
+      setIsRepo(true); setGitRoot(repoRoot ?? root); setStatus(nextStatus); setGitError(null);
+    } catch (error) {
+      setIsRepo(null); setStatus(null); setGitRoot(null);
+      setGitError(error instanceof Error ? error.message : 'Git access failed');
+    } finally {
+      gitRefreshPending.current = false;
+    }
   }, [root]);
 
   useEffect(() => {
@@ -544,6 +551,11 @@ export function IdePanel() {
                 })}
               </div>
             </div>
+            )}
+            {gitError && !gitCollapsed && (
+              <div role="alert" style={{ padding: 12, color: 'var(--cth-ink-900)', fontSize: 12 }}>
+                {gitError}
+              </div>
             )}
             {railTab === 'history' && gitRoot && !gitCollapsed && (
               <HistoryPane key={gitRoot} gitRoot={gitRoot} onOpenRevDiff={openRevDiff} />

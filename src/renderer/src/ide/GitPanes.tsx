@@ -65,6 +65,7 @@ export function HistoryPane({ gitRoot, onOpenRevDiff }: {
   const [commits, setCommits] = useState<GitCommitRow[]>([]);
   const [branch, setBranch] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
+  const [historyError, setHistoryError] = useState<string | null>(null);
   const [selected, setSelected] = useState<GitCommitRow | null>(null);
   const [files, setFiles] = useState<GitFileChange[] | null>(null);
   const [note, setNote] = useState('');
@@ -72,12 +73,17 @@ export function HistoryPane({ gitRoot, onOpenRevDiff }: {
 
   const load = useCallback(async (pages: number) => {
     setLoading(true);
+    setHistoryError(null);
     const [log, br] = await Promise.all([
       window.cth.gitLogGraph(gitRoot, pages * 200),
       window.cth.gitBranch(gitRoot)
     ]);
-    if (Array.isArray(log)) setCommits(log);
-    if (!('error' in br)) setBranch(br.current);
+    if (!Array.isArray(log) || 'error' in br) {
+      setCommits([]); setBranch(null); setSelected(null); setFiles(null);
+      setHistoryError(!Array.isArray(log) ? log.error : 'error' in br ? br.error : 'Git history failed');
+    } else {
+      setCommits(log); setBranch(br.current);
+    }
     setLoading(false);
   }, [gitRoot]);
 
@@ -105,7 +111,8 @@ export function HistoryPane({ gitRoot, onOpenRevDiff }: {
     <div style={{ display: 'flex', flexDirection: 'column', minHeight: 0, flex: 1 }}>
       <div style={{ flex: 1, minHeight: 0, overflow: 'auto' }}>
         {loading && commits.length === 0 && <div style={noteStyle}>{t('gitPanes.loadingHistory')}</div>}
-        {!loading && commits.length === 0 && <div style={noteStyle}>{t('gitTab.noCommits')}</div>}
+        {historyError && <div role="alert" style={noteStyle}>{historyError}</div>}
+        {!loading && !historyError && commits.length === 0 && <div style={noteStyle}>{t('gitTab.noCommits')}</div>}
         <CommitGraph commits={commits} currentBranch={branch} onCommitClick={(sha) => { void pick(sha); }} />
         {commits.length >= page * 200 && (
           <div style={{ padding: '4px 12px' }}>

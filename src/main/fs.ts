@@ -1,10 +1,11 @@
-import { readdir, readFile, writeFile, stat } from 'node:fs/promises';
-import { isAbsolute, join, normalize, relative, resolve } from 'node:path';
+import { readdir, readFile, writeFile, stat, realpath, lstat } from 'node:fs/promises';
+import { dirname, isAbsolute, join, normalize, relative, resolve, sep } from 'node:path';
 import { homedir } from 'node:os';
 import { imageMimeForPath } from '../shared/imageTypes';
 
 /**
- * Confines `path` inside `root` to prevent path-traversal escapes.
+ * Checks lexical containment. Actual filesystem access must also use
+ * confinedPath so symbolic links and Windows junctions are resolved.
  * Returns the resolved absolute path on success, or null on violation.
  *
  * Exported so other main-process modules (e.g. git.ts) validate caller-supplied
@@ -15,8 +16,36 @@ export function safeJoin(root: string, rel: string): string | null {
   const absRoot = resolve(root);
   const absPath = isAbsolute(rel) ? normalize(rel) : resolve(absRoot, rel);
   const rel2 = relative(absRoot, absPath);
-  if (rel2.startsWith('..') || isAbsolute(rel2)) return null;
+  if (rel2 === '..' || rel2.startsWith(`..${sep}`) || isAbsolute(rel2)) return null;
   return absPath;
+}
+
+/** Resolve existing links before access, including the parent of a new file.
+ * This rejects static link escapes, not concurrent hostile link replacement:
+ * Node's portable path APIs do not provide a handle-relative filesystem sandbox.
+ * Root authorization remains the caller's responsibility.
+ */
+export async function confinedPath(root: string, rel: string): Promise<string | null> {
+  const abs = safeJoin(root, rel);
+  if (!abs) return null;
+  const canonicalRoot = await realpath(root);
+  let existing = abs;
+  while (true) {
+    try {
+      // lstat distinguishes a missing path from a dangling link. A dangling
+      // link must fail realpath, never be mistaken for a new writable file.
+      await lstat(existing);
+      break;
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+      const parent = dirname(existing);
+      if (parent === existing) throw error;
+      existing = parent;
+    }
+  }
+  const canonicalParent = await realpath(existing);
+  const target = resolve(canonicalParent, relative(existing, abs));
+  return safeJoin(canonicalRoot, target);
 }
 
 export interface DirEntry {
@@ -29,13 +58,15 @@ export interface DirEntry {
 export async function listDir(root: string, rel: string): Promise<{
   ok: true; entries: DirEntry[]; path: string;
 } | { ok: false; error: string }> {
-  const abs = safeJoin(root, rel);
-  if (!abs) return { ok: false, error: 'path escapes root' };
   try {
+    const abs = await confinedPath(root, rel);
+    if (!abs) return { ok: false, error: 'path escapes root' };
     const names = await readdir(abs);
     const entries = await Promise.all(names.map(async (name): Promise<DirEntry> => {
       try {
-        const s = await stat(join(abs, name));
+        const entry = await confinedPath(root, join(rel, name));
+        if (!entry) return { name, isDir: false, size: 0, mtime: 0 };
+        const s = await stat(entry);
         return { name, isDir: s.isDirectory(), size: s.size, mtime: s.mtimeMs };
       } catch {
         return { name, isDir: false, size: 0, mtime: 0 };
@@ -45,7 +76,7 @@ export async function listDir(root: string, rel: string): Promise<{
       if (a.isDir !== b.isDir) return a.isDir ? -1 : 1;
       return a.name.localeCompare(b.name);
     });
-    return { ok: true, entries, path: abs };
+    return { ok: true, entries, path: resolve(root, rel) };
   } catch (e) {
     return { ok: false, error: e instanceof Error ? e.message : String(e) };
   }
@@ -56,9 +87,9 @@ const MAX_READ_BYTES = 2 * 1024 * 1024; // 2 MB
 export async function readFileText(root: string, rel: string): Promise<{
   ok: true; content: string; path: string; size: number;
 } | { ok: false; error: string }> {
-  const abs = safeJoin(root, rel);
-  if (!abs) return { ok: false, error: 'path escapes root' };
   try {
+    const abs = await confinedPath(root, rel);
+    if (!abs) return { ok: false, error: 'path escapes root' };
     const s = await stat(abs);
     if (s.size > MAX_READ_BYTES) {
       return { ok: false, error: `file too large (${(s.size / 1024 / 1024).toFixed(1)} MB)` };
@@ -66,7 +97,7 @@ export async function readFileText(root: string, rel: string): Promise<{
     const buf = await readFile(abs);
     // Reject obvious binary files based on null-byte sniff
     if (buf.includes(0)) return { ok: false, error: 'binary file (not displayable)' };
-    return { ok: true, content: buf.toString('utf8'), path: abs, size: s.size };
+    return { ok: true, content: buf.toString('utf8'), path: resolve(root, rel), size: s.size };
   } catch (e) {
     return { ok: false, error: e instanceof Error ? e.message : String(e) };
   }
@@ -102,9 +133,9 @@ const MAX_BINARY_READ_BYTES = 10 * 1024 * 1024; // 10 MB
 export async function readFileBinary(root: string, rel: string, maxBytes = MAX_BINARY_READ_BYTES): Promise<{
   ok: true; bytes: Uint8Array<ArrayBuffer>; mime: string; path: string; size: number;
 } | { ok: false; error: string }> {
-  const abs = safeJoin(root, rel);
-  if (!abs) return { ok: false, error: 'path escapes root' };
   try {
+    const abs = await confinedPath(root, rel);
+    if (!abs) return { ok: false, error: 'path escapes root' };
     const s = await stat(abs);
     // Directories and FIFOs are the trap here: readFile on a directory throws
     // (fine) but on a FIFO it BLOCKS forever with no size to check against, which
@@ -130,8 +161,8 @@ export async function readFileBinary(root: string, rel: string, maxBytes = MAX_B
     return {
       ok: true,
       bytes,
-      mime: imageMimeForPath(abs) ?? 'application/octet-stream',
-      path: abs,
+      mime: imageMimeForPath(rel) ?? 'application/octet-stream',
+      path: resolve(root, rel),
       size: s.size
     };
   } catch (e) {
@@ -142,11 +173,11 @@ export async function readFileBinary(root: string, rel: string, maxBytes = MAX_B
 export async function writeFileText(root: string, rel: string, content: string): Promise<{
   ok: true; path: string;
 } | { ok: false; error: string }> {
-  const abs = safeJoin(root, rel);
-  if (!abs) return { ok: false, error: 'path escapes root' };
   try {
+    const abs = await confinedPath(root, rel);
+    if (!abs) return { ok: false, error: 'path escapes root' };
     await writeFile(abs, content, 'utf8');
-    return { ok: true, path: abs };
+    return { ok: true, path: resolve(root, rel) };
   } catch (e) {
     return { ok: false, error: e instanceof Error ? e.message : String(e) };
   }

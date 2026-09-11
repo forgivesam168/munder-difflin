@@ -46,9 +46,23 @@ credit you (unless you prefer to stay anonymous).
 
 - Renderer ↔ main IPC goes through a typed `contextBridge` (`window.cth`); the renderer
   has no direct Node access (`nodeIntegration: false`, `contextIsolation: true`).
-- Filesystem helpers enforce lexical and static realpath containment. Renderer
-  root authorization, concurrent link replacement and other host access paths
-  remain separate unresolved boundaries; this is not an OS sandbox.
+- The current research source gates all `fs:`/`git:` IPC on an owned top-level app
+  document and main-owned root consent. Saved project entries do not grant access.
+  Metadata checks/file-browser display use a separate scope from file contents,
+  writes and Git operations. Metadata scope covers the requested parent directory,
+  not just one file. Consent precedes filesystem resolution.
+- Grants expire on main-frame cross-document navigation, renderer termination or
+  WebContents destruction. Pending requests recheck their grant session before
+  dispatch; operations already dispatched are not cancelled.
+- Windows roots must be fully qualified drive or UNC share paths; device namespaces
+  are unsupported. Tilde targets expand before consent. Positive grants preserve case;
+  denial and pending-prompt exclusion conservatively ignore case on Windows. This
+  can deny a distinct case-sensitive sibling until the document session is reset.
+- Filesystem helpers enforce lexical and static realpath containment. These controls
+  have source and synthetic Windows test evidence, not complete native Electron UX
+  or current packaged-artifact acceptance. Remaining consumer integration, concurrent
+  link replacement, Git hooks/config/indirection and other host access paths remain
+  unresolved. This is not an OS sandbox or a complete compromised-renderer defense.
 - The hive's own committer does not prevent spawned agents from invoking Git or
   accessing credentials available to their execution environment. A worktree is
   not credential or repository isolation.

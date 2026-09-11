@@ -55,12 +55,16 @@ export function GitTab({ cwd }: GitTabProps) {
   const [error, setError] = useState<string | undefined>();
 
   const refresh = async () => {
+    const clearData = () => {
+      setBranch(null); setDetached(false); setStatus(null); setLog([]);
+      setBranches(null); setAhead(0); setBehind(0); setUpstream(null);
+    };
     setLoading(true);
     setError(undefined);
     try {
       const repo = await window.cth.gitIsRepo(cwd);
       setIsRepo(repo);
-      if (!repo) { setLoading(false); return; }
+      if (!repo) { clearData(); return; }
       const [b, s, l, br, ab] = await Promise.all([
         window.cth.gitBranch(cwd),
         window.cth.gitStatus(cwd),
@@ -68,12 +72,17 @@ export function GitTab({ cwd }: GitTabProps) {
         window.cth.gitBranches(cwd),
         window.cth.gitAheadBehind(cwd)
       ]);
-      if ('error' in b) setError(b.error);
-      else { setBranch(b.current); setDetached(b.detached); }
-      if ('error' in s) setError(prev => prev ?? s.error); else setStatus(s);
-      if (Array.isArray(l)) setLog(l); else if ('error' in l) setError(prev => prev ?? l.error);
-      if ('error' in br) setError(prev => prev ?? br.error); else setBranches({ local: br.local, remote: br.remote });
-      if ('error' in ab) { /* keep defaults */ } else { setAhead(ab.ahead); setBehind(ab.behind); setUpstream(ab.upstream); }
+      if ('error' in b) throw new Error(b.error);
+      if ('error' in s) throw new Error(s.error);
+      if (!Array.isArray(l)) throw new Error(l.error);
+      if ('error' in br) throw new Error(br.error);
+      if ('error' in ab) throw new Error(ab.error);
+      setBranch(b.current); setDetached(b.detached); setStatus(s); setLog(l);
+      setBranches({ local: br.local, remote: br.remote });
+      setAhead(ab.ahead); setBehind(ab.behind); setUpstream(ab.upstream);
+    } catch (failure) {
+      clearData(); setIsRepo(null);
+      setError(failure instanceof Error && failure.message.trim() ? failure.message : 'Git access failed');
     } finally {
       setLoading(false);
     }
@@ -136,7 +145,7 @@ export function GitTab({ cwd }: GitTabProps) {
       </div>
 
       {error && (
-        <div style={{
+        <div role="alert" style={{
           padding: '4px 10px',
           background: 'var(--cth-coral-light)',
           color: 'var(--cth-ink-900)',
@@ -146,7 +155,7 @@ export function GitTab({ cwd }: GitTabProps) {
       )}
 
       {/* Body — scrollable, contains status + branches + graph */}
-      <div style={{ flex: 1, minHeight: 0, overflow: 'auto' }}>
+      {!error && <div style={{ flex: 1, minHeight: 0, overflow: 'auto' }}>
         {/* Status */}
         <Section title={t('gitTab.sectionStatus')}>
           {status && (
@@ -197,7 +206,7 @@ export function GitTab({ cwd }: GitTabProps) {
             <div style={{ padding: 12, color: 'var(--cth-ink-500)', fontSize: 12 }}>{t('gitTab.noCommits')}</div>
           )}
         </Section>
-      </div>
+      </div>}
     </div>
   );
 }

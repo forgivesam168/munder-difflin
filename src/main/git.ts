@@ -1,6 +1,7 @@
 import { spawn } from 'node:child_process';
 import { readFile, stat } from 'node:fs/promises';
-import { safeJoin } from './fs';
+import { resolve as resolvePath } from 'node:path';
+import { confinedPath, safeJoin } from './fs';
 
 /** Run git in `cwd` with `args`. Returns stdout text or an error. */
 function runGit(cwd: string, args: string[], timeoutMs = 8000): Promise<{
@@ -170,7 +171,12 @@ export interface GitDiff {
 export async function getDiff(
   cwd: string, relPath: string
 ): Promise<GitDiff | { ok: false; error: string }> {
-  const abs = safeJoin(cwd, relPath);
+  let abs: string | null;
+  try {
+    abs = await confinedPath(cwd, relPath);
+  } catch (error) {
+    return { ok: false, error: error instanceof Error ? error.message : String(error) };
+  }
   if (!abs) return { ok: false, error: 'path escapes repository root' };
 
   // HEAD side: `git show HEAD:<path>` — errors (untracked / new file) → no head version.
@@ -199,7 +205,7 @@ export async function getDiff(
   const isBinary = workingBinary || head.includes('\0');
   return {
     ok: true,
-    path: abs,
+    path: resolvePath(cwd, relPath),
     relPath,
     head: isBinary ? '' : head,
     working: isBinary ? '' : working,

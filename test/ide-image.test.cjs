@@ -22,7 +22,105 @@ const path = require('node:path');
 const loadTs = require('./load-ts.cjs');
 
 const { extensionOf, imageMimeForPath, isImagePath, isSvgPath, formatBytes } = loadTs('src/shared/imageTypes.ts');
-const { readFileBinary } = loadTs('src/main/fs.ts');
+const { readFileBinary, readFileText, writeFileText, listDir } = loadTs('src/main/fs.ts');
+const { getDiff } = loadTs('src/main/git.ts');
+const { ProjectRootGrants } = loadTs('src/main/projectRoots.ts');
+
+test('Windows spelling variants cannot bypass denial or inherit pending/positive grants', { skip: process.platform !== 'win32' }, async () => {
+  const { dir, root } = makeWorkspace();
+  try {
+    const denied = new ProjectRootGrants();
+    let prompts = 0;
+    const refuse = async () => { prompts++; return false; };
+    await assert.rejects(() => denied.authorize(root, refuse), /declined/);
+    for (const variant of [root + path.sep, root.toUpperCase(), root.replace(/\\/g, '/')]) {
+      await assert.rejects(() => denied.authorize(variant, refuse), /denied/);
+    }
+    assert.equal(prompts, 1);
+    const grants = new ProjectRootGrants();
+    let decide;
+    const first = grants.authorize(root, () => new Promise(resolve => { decide = resolve; }));
+    const duplicate = grants.authorize(root + path.sep, async () => { throw new Error('duplicate prompt'); });
+    await assert.rejects(() => grants.authorize(root.toUpperCase(), async () => true), /differently cased/);
+    decide(true);
+    assert.equal(await first, await duplicate);
+    await grants.authorize(root + path.sep, async () => { throw new Error('repeat prompt'); });
+    // Deny before filesystem lookup: even if this spelling represented a distinct
+    // directory on a case-sensitive volume, it cannot inherit the first approval.
+    await assert.rejects(() => grants.authorize(root.toUpperCase(), refuse), /declined/);
+    await assert.rejects(() => grants.authorize(root, async () => true), /denied/);
+    assert.equal(prompts, 2);
+  } finally { fs.rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('Windows root consent requires a fully qualified drive or UNC share', { skip: process.platform !== 'win32' }, async () => {
+  const grants = new ProjectRootGrants();
+  let prompts = 0;
+  const deny = async () => { prompts++; return false; };
+  for (const root of ['\\Work', '/Work', '\\\\server', '//server', '\\\\?\\C:\\Work', '\\\\.\\C:\\Work', 'C:Work']) {
+    await assert.rejects(() => grants.authorize(root, deny), /absolute|fully qualified/);
+    assert.equal(prompts, 0, 'ambiguous/device roots must not reach consent or filesystem resolution');
+  }
+  for (const root of ['C:\\Synthetic', 'C:/Synthetic', '\\\\server\\share', '//server/share/folder']) {
+    await assert.rejects(() => new ProjectRootGrants().authorize(root, deny), /declined/);
+  }
+  assert.equal(prompts, 4, 'qualified paths reach consent without accessing disk/network after denial');
+});
+
+test('inspect and project grants never share consent, denial or pending decisions', async () => {
+  const { dir, root } = makeWorkspace();
+  try {
+    const grants = new ProjectRootGrants();
+    let allowInspect;
+    const inspect = grants.authorize(root, () => new Promise(resolve => { allowInspect = resolve; }), 'inspect');
+    await assert.rejects(() => grants.authorize(root, async () => false, 'project'), /declined/);
+    allowInspect(true);
+    assert.equal(await inspect, fs.realpathSync(root));
+    await grants.authorize(root, async () => { throw new Error('repeat inspect prompt'); }, 'inspect');
+    await assert.rejects(() => grants.authorize(root, async () => true, 'project'), /denied/);
+    const fresh = new ProjectRootGrants();
+    await fresh.authorize(root, async () => true, 'inspect');
+    let projectPrompts = 0;
+    await fresh.authorize(root, async () => { projectPrompts++; return true; }, 'project');
+    assert.equal(projectPrompts, 1);
+    fresh.revoke();
+    for (const scope of ['inspect', 'project']) await assert.rejects(() => fresh.authorize(root, async () => true, scope), /revoked/);
+  } finally { fs.rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('root access requires consent, coalesces pending requests and revokes retargeted junctions', async () => {
+  const { dir, root } = makeWorkspace();
+  try {
+    const grants = new ProjectRootGrants();
+    let calls = 0;
+    let decide;
+    const consent = () => { calls++; return new Promise(resolve => { decide = resolve; }); };
+    const first = grants.authorize(root, consent);
+    const second = grants.authorize(root, consent);
+    assert.equal(calls, 1);
+    decide(true);
+    assert.equal(await first, fs.realpathSync(root));
+    assert.equal(await second, fs.realpathSync(root));
+    await grants.authorize(root, async () => { throw new Error('unexpected repeat prompt'); });
+    const alias = path.join(dir, 'authorized-alias');
+    fs.symlinkSync(root, alias, process.platform === 'win32' ? 'junction' : 'dir');
+    await grants.authorize(alias, async () => true);
+    const other = path.join(dir, 'other-root');
+    fs.mkdirSync(other);
+    fs.unlinkSync(alias);
+    fs.symlinkSync(other, alias, process.platform === 'win32' ? 'junction' : 'dir');
+    await assert.rejects(() => grants.authorize(alias, async () => true), /target changed/);
+    await assert.rejects(() => grants.authorize(alias, async () => true), /denied/);
+  } finally { fs.rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('denial precedes filesystem lookup and cannot be overridden by later renderer requests', async () => {
+  const grants = new ProjectRootGrants();
+  const absent = path.join(os.tmpdir(), 'unapproved-nonexistent-project');
+  await assert.rejects(() => grants.authorize(absent, async () => false), /declined/);
+  await assert.rejects(() => grants.authorize(absent, async () => true), /denied/);
+  await assert.rejects(() => grants.authorize('../relative', async () => true), /absolute/);
+});
 const { resolveLocalImageRel, resolveRel } = loadTs('src/renderer/src/markdown/mdLinks.ts');
 
 // ─── extension → mime ───────────────────────────────────────────────────────
@@ -236,6 +334,84 @@ test('unknown binary types still read, labelled octet-stream', async () => {
     const res = await readFileBinary(root, 'blob.bin');
     assert.equal(res.ok, true);
     assert.equal(res.mime, 'application/octet-stream', 'never guess an image mime for an unknown extension');
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('filesystem operations reject a junction into a sibling workspace', async () => {
+  const { dir, root } = makeWorkspace();
+  try {
+    const outside = path.join(dir, 'sibling');
+    fs.mkdirSync(outside);
+    fs.writeFileSync(path.join(outside, 'private.txt'), 'synthetic outside data');
+    fs.symlinkSync(outside, path.join(root, 'linked'), process.platform === 'win32' ? 'junction' : 'dir');
+    for (const result of [
+      await readFileBinary(root, 'linked/private.txt'),
+      await readFileText(root, 'linked/private.txt'),
+      await listDir(root, 'linked'),
+      await writeFileText(root, 'linked/private.txt', 'overwrite'),
+      await writeFileText(root, 'linked/new.txt', 'create')
+    ]) {
+      assert.equal(result.ok, false, 'linked target outside the root must be rejected');
+      assert.match(result.error, /path escapes root/);
+    }
+    assert.equal(fs.readFileSync(path.join(outside, 'private.txt'), 'utf8'), 'synthetic outside data');
+    assert.equal(fs.existsSync(path.join(outside, 'new.txt')), false);
+    const diff = await getDiff(root, 'linked/private.txt');
+    assert.equal(diff.ok, false);
+    assert.match(diff.error, /path escapes repository root/);
+    const listing = await listDir(root, '.');
+    assert.equal(listing.ok, true);
+    assert.deepEqual(listing.entries.find(entry => entry.name === 'linked'), {
+      name: 'linked', isDir: false, size: 0, mtime: 0
+    });
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('filesystem operations retain in-root links, new files, and dotted names', async () => {
+  const { dir, root } = makeWorkspace();
+  try {
+    fs.symlinkSync(path.join(root, 'docs'), path.join(root, 'linked'), process.platform === 'win32' ? 'junction' : 'dir');
+    const linkedImage = await readFileBinary(root, 'linked/shot.png');
+    assert.equal(linkedImage.ok, true);
+    assert.equal(linkedImage.path, path.join(root, 'linked', 'shot.png'));
+    assert.equal((await writeFileText(root, 'linked/new.txt', 'new content')).ok, true);
+    assert.equal((await readFileText(root, 'docs/new.txt')).content, 'new content');
+    assert.equal((await writeFileText(root, '..notes', 'dot name')).ok, true);
+    assert.equal((await listDir(root, 'linked')).ok, true);
+    const alias = path.join(dir, 'workspace alias');
+    fs.symlinkSync(root, alias, process.platform === 'win32' ? 'junction' : 'dir');
+    const listing = await listDir(alias, 'docs');
+    assert.equal(listing.ok, true);
+    assert.equal(listing.entries.find(entry => entry.name === 'shot.png').size, ONE_PIXEL_PNG.length);
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('file links retain the requested image MIME and dangling links cannot create outside files', async (t) => {
+  const { dir, root } = makeWorkspace();
+  try {
+    fs.writeFileSync(path.join(root, 'asset.dat'), ONE_PIXEL_PNG);
+    try {
+      fs.symlinkSync(path.join(root, 'asset.dat'), path.join(root, 'image.png'), 'file');
+    } catch (error) {
+      if (process.platform === 'win32' && error.code === 'EPERM') {
+        t.skip('Windows file-symlink privilege unavailable; junction tests still execute');
+        return;
+      }
+      throw error;
+    }
+    const image = await readFileBinary(root, 'image.png');
+    assert.equal(image.ok, true);
+    assert.equal(image.mime, 'image/png');
+    const outside = path.join(dir, 'not-created.txt');
+    fs.symlinkSync(outside, path.join(root, 'dangling.txt'), 'file');
+    assert.equal((await writeFileText(root, 'dangling.txt', 'blocked')).ok, false);
+    assert.equal(fs.existsSync(outside), false);
   } finally {
     fs.rmSync(dir, { recursive: true, force: true });
   }

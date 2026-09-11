@@ -913,7 +913,6 @@ export function disposeTerminal(ptyId: string): void {
 // v0.4.5 widened this from markdown-only to every path token. What each type
 // does lives in @shared/terminalPaths, not here — this file only knows how to
 // find tokens on a line and how to run the three verdicts.
-const mdStatCache = new Map<string, { isFile: boolean; path: string }>();
 
 function resolvePathCandidate(ptyId: string, raw: string): string | null {
   const p = stripPathToken(raw);
@@ -949,14 +948,10 @@ void import('@/store/store')
  *  does not need to pass the verdict along — it only needs to know whether the
  *  file is ours to open at all. */
 async function activatePath(abs: string, action: PathAction): Promise<void> {
-  let hit = mdStatCache.get(abs);
-  if (!hit) {
-    const res = await window.cth.statAbs(abs).catch(() => null);
-    if (!res || !res.exists) return;
-    hit = { isFile: res.isFile, path: res.path };
-    if (mdStatCache.size > 500) mdStatCache.clear();
-    mdStatCache.set(abs, hit);
-  }
+  // Metadata is not a durable access grant. Recheck main on every explicit
+  // activation so disappeared files or revoked roots cannot reuse a stale hit.
+  const hit = await window.cth.statAbs(abs).catch(() => null);
+  if (!hit || !hit.exists) return;
   if (action === 'reveal' || !hit.isFile) {
     void window.cth.revealPath(hit.path).catch(() => { /* file browser refused */ });
     return;

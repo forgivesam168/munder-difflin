@@ -1,4 +1,14 @@
 import { contextBridge, ipcRenderer, webUtils, type IpcRendererEvent } from 'electron';
+
+// Authorization/transport failures use the same result contract as filesystem
+// failures so existing renderer error states settle instead of staying pending.
+function fileOperationError(error: unknown): { ok: false; error: string } {
+  return { ok: false, error: error instanceof Error ? error.message : 'File operation failed' };
+}
+
+function gitOperationError(error: unknown): { error: string } {
+  return { error: error instanceof Error ? error.message : 'Git operation failed' };
+}
 import type { AgentProvider } from '../shared/agentProvider';
 import type { HireManifest } from '../shared/hire';
 export type { HireManifest } from '../shared/hire';
@@ -672,10 +682,10 @@ const api = {
   // ─── Filesystem (sandboxed to cwd) ───────────────────────────────────────
   listDir: (root: string, rel: string): Promise<
     { ok: true; entries: DirEntry[]; path: string } | { ok: false; error: string }
-  > => ipcRenderer.invoke('fs:listDir', root, rel),
+  > => ipcRenderer.invoke('fs:listDir', root, rel).catch(fileOperationError),
   readFile: (root: string, rel: string): Promise<
     { ok: true; content: string; path: string; size: number } | { ok: false; error: string }
-  > => ipcRenderer.invoke('fs:readFile', root, rel),
+  > => ipcRenderer.invoke('fs:readFile', root, rel).catch(fileOperationError),
   /** Raw bytes for files `readFile` refuses (images). The renderer has no way to
    *  load them off disk — the CSP allows no `file:` source and no file protocol
    *  is registered — so images travel as bytes and become a `blob:` URL in the
@@ -688,10 +698,10 @@ const api = {
     // `ArrayBufferLike` admits SharedArrayBuffer, which BlobPart rejects.
     { ok: true; bytes: Uint8Array<ArrayBuffer>; mime: string; path: string; size: number }
     | { ok: false; error: string }
-  > => ipcRenderer.invoke('fs:readBinary', root, rel),
+  > => ipcRenderer.invoke('fs:readBinary', root, rel).catch(fileOperationError),
   writeFile: (root: string, rel: string, content: string): Promise<
     { ok: true; path: string } | { ok: false; error: string }
-  > => ipcRenderer.invoke('fs:writeFile', root, rel, content),
+  > => ipcRenderer.invoke('fs:writeFile', root, rel, content).catch(fileOperationError),
   /** v0.3.4: existence check for an absolute path (expands ~) — backs the
    *  terminal ⌘-click markdown flow. Metadata only, never contents. */
   statAbs: (p: string): Promise<{ exists: boolean; isFile: boolean; path: string }> =>
@@ -709,31 +719,31 @@ const api = {
    *  resolves to the original repo, not to itself. null when not a git repo. */
   gitMainRepo: (cwd: string): Promise<string | null> => ipcRenderer.invoke('git:mainRepo', cwd),
   gitBranch: (cwd: string) =>
-    ipcRenderer.invoke('git:branch', cwd) as Promise<{ current: string | null; detached: boolean } | { error: string }>,
+    ipcRenderer.invoke('git:branch', cwd).catch(gitOperationError) as Promise<{ current: string | null; detached: boolean } | { error: string }>,
   gitStatus: (cwd: string) =>
     ipcRenderer.invoke('git:status', cwd) as Promise<GitStatus | { error: string }>,
   gitLog: (cwd: string, n?: number) =>
     ipcRenderer.invoke('git:log', cwd, n ?? 50) as Promise<GitCommit[] | { error: string }>,
   gitBranches: (cwd: string) =>
-    ipcRenderer.invoke('git:branches', cwd) as Promise<{ local: string[]; remote: string[]; current: string | null } | { error: string }>,
+    ipcRenderer.invoke('git:branches', cwd).catch(gitOperationError) as Promise<{ local: string[]; remote: string[]; current: string | null } | { error: string }>,
   gitAheadBehind: (cwd: string) =>
     ipcRenderer.invoke('git:aheadBehind', cwd) as Promise<{ ahead: number; behind: number; upstream: string | null } | { error: string }>,
   /** Diff one repo-root-relative file: its HEAD content vs its working-tree content.
    *  Path-validated main-side against `cwd`; the renderer only ever gets the two
    *  text sides. Backs the IDE's git-diff (Monaco DiffEditor) view. */
   gitDiff: (cwd: string, relPath: string) =>
-    ipcRenderer.invoke('git:diff', cwd, relPath) as Promise<GitDiff | { ok: false; error: string }>,
+    ipcRenderer.invoke('git:diff', cwd, relPath).catch(fileOperationError) as Promise<GitDiff | { ok: false; error: string }>,
   // ── v0.3.4: history / compare / checkout (git visualization) ──
   gitLogGraph: (cwd: string, n: number, skip?: number) =>
-    ipcRenderer.invoke('git:logGraph', cwd, n, skip ?? 0) as Promise<GitCommitRow[] | { error: string }>,
+    ipcRenderer.invoke('git:logGraph', cwd, n, skip ?? 0).catch(gitOperationError) as Promise<GitCommitRow[] | { error: string }>,
   gitCommitFiles: (cwd: string, sha: string) =>
-    ipcRenderer.invoke('git:commitFiles', cwd, sha) as Promise<GitFileChange[] | { error: string }>,
+    ipcRenderer.invoke('git:commitFiles', cwd, sha).catch(gitOperationError) as Promise<GitFileChange[] | { error: string }>,
   gitShowFile: (cwd: string, rev: string, relPath: string) =>
-    ipcRenderer.invoke('git:showFile', cwd, rev, relPath) as Promise<
+    ipcRenderer.invoke('git:showFile', cwd, rev, relPath).catch(fileOperationError) as Promise<
       { ok: true; exists: boolean; isBinary: boolean; content: string } | { ok: false; error: string }
     >,
   gitCompareRefs: (cwd: string, base: string, head: string, mode?: 'two' | 'three') =>
-    ipcRenderer.invoke('git:compareRefs', cwd, base, head, mode ?? 'three') as Promise<
+    ipcRenderer.invoke('git:compareRefs', cwd, base, head, mode ?? 'three').catch(gitOperationError) as Promise<
       { ahead: number; behind: number; mergeBase: string | null; files: GitFileChange[] } | { error: string }
     >,
   gitWorktrees: (cwd: string) =>
@@ -741,7 +751,8 @@ const api = {
       Array<{ path: string; head: string; branch: string | null }> | { error: string }
     >,
   gitCheckout: (cwd: string, ref: string, detach?: boolean) =>
-    ipcRenderer.invoke('git:checkout', cwd, ref, detach === true) as Promise<
+    ipcRenderer.invoke('git:checkout', cwd, ref, detach === true)
+      .catch(error => ({ ok: false as const, ...gitOperationError(error) })) as Promise<
       { ok: true; detached: boolean } | { ok: false; error: string }
     >,
 
