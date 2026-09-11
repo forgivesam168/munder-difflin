@@ -1,0 +1,9 @@
+{
+  "restored": true,
+  "restoredGates": [
+    "tools/research-electron-lifecycle.cjs",
+    "tools/research-lifecycle-parent.cjs",
+    "tools/research-lifecycle-supervisor.ps1"
+  ],
+  "fixtureExit": 0
+}

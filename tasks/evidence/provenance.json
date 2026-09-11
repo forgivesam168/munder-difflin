@@ -1,0 +1,41 @@
+{
+  "status": "REDACTED_REVIEW_COPIES_NOT_ORIGINAL_HASH_EQUIVALENTS",
+  "copies": [
+    {
+      "originalLocalPath": "tasks/native-read-run-2026-09-11.json",
+      "originalSha256": "47229670b280d895cd7ca53abef03cc7c92662537c534e138d9958dc92a1c4a6",
+      "copyPath": "tasks/evidence/actual-read-checkpoint.redacted.json",
+      "copySha256": "bee03386ff96d4b4baba89cac610c399ddacdde6bb35ff3cc1dd1a97f5c205a1",
+      "redaction": "workspace absolute path replaced with <REPOSITORY>; JSON serialization normalized; embedded original hashes unchanged and refer only to original bytes"
+    },
+    {
+      "originalLocalPath": ".tmp/electron-lifecycle-aFH8ku/lifecycle-request.json",
+      "originalSha256": "a11d5aaeb06c3d48c28b88903f598d650633aa3bce812d7de2cf1db24ee60206",
+      "copyPath": "tasks/evidence/actual-read-request.redacted.json",
+      "copySha256": "94dc7fb2cde7d6accc923db1425fa4256ceeac1eb8097158c2cf3c5a67135d68",
+      "redaction": "workspace absolute path replaced with <REPOSITORY>; JSON serialization normalized; embedded original hashes unchanged and refer only to original bytes"
+    },
+    {
+      "originalLocalPath": ".tmp/electron-lifecycle-aFH8ku/lifecycle-result.json",
+      "originalSha256": "ff2dae78ae2b643e3d96e4e4ad0bb0885ec7ff35ae50e1a3141e9ec1ab547bb4",
+      "copyPath": "tasks/evidence/actual-read-result.redacted.json",
+      "copySha256": "2df8b3bad0634849eba4b1736aada9cb0e187bf1d6cb7e5c54e0c1f221780cfb",
+      "redaction": "workspace absolute path replaced with <REPOSITORY>; JSON serialization normalized; embedded original hashes unchanged and refer only to original bytes"
+    },
+    {
+      "originalLocalPath": ".tmp/electron-lifecycle-aFH8ku/supervisor-receipt.json",
+      "originalSha256": "b2884e0c88d34f8d43b481cefbf5dadb4641ca01dd6c7f9bc28ec1d83e64f251",
+      "copyPath": "tasks/evidence/actual-read-receipt.redacted.json",
+      "copySha256": "40db27582b6b5f21d45f675a4808915f9a52b5999b7c81fb4ca5994bb30d3b5d",
+      "redaction": "workspace absolute path replaced with <REPOSITORY>; JSON serialization normalized; embedded original hashes unchanged and refer only to original bytes"
+    },
+    {
+      "originalLocalPath": ".tmp/native-read-run-20260911/gate-restoration.json",
+      "originalSha256": "136d44f044a3a9ec76e1121dd049427f8ced02866fedab5837ad018e1b68448f",
+      "copyPath": "tasks/evidence/actual-read-restoration.redacted.json",
+      "copySha256": "2c457329212e87789ed0ff90179b2d1a50ad42322fa05106b95c299391a77102",
+      "redaction": "workspace absolute path replaced with <REPOSITORY>; JSON serialization normalized; embedded original hashes unchanged and refer only to original bytes"
+    }
+  ],
+  "limitations": "Original receipts/logs retained locally. Copies permit assertion review, not cryptographic reproduction of original request/result digests or replay authority."
+}

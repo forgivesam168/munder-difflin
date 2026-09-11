@@ -1,0 +1,18 @@
+{
+  "scope": "Local review snapshot assembly, no Electron execution",
+  "results": {
+    "nodeTypecheck": "exit0",
+    "webTypecheck": "exit0",
+    "ideImage": "26PASS 1SKIP Windows file-symlink privilege"
+  },
+  "originalLocalLogSha256": {
+    ".tmp/command-uk81ld/command.log": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    ".tmp/command-RasGGa/command.log": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    ".tmp/command-BiE4jT/command.log": "8a35a55964fa4f69671ae4f5e9b551e601d9ca33edbf28070bdb770f639f03c0"
+  },
+  "limitations": [
+    "Typechecks ran in current dirty worktree, not isolated clean commit",
+    "Uncommitted compatibility cohort excluded from snapshot; no full-suite claim",
+    "Existing exact-bound trailing whitespace retained in research-lifecycle-binding.cjs:26; staged diff check reports one finding"
+  ]
+}

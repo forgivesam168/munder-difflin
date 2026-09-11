@@ -1,0 +1,16 @@
+{
+  "version": 2,
+  "run": "<REPOSITORY>\\.tmp\\electron-lifecycle-aFH8ku",
+  "kind": "electron-lifecycle",
+  "requestSha256": "a11d5aaeb06c3d48c28b88903f598d650633aa3bce812d7de2cf1db24ee60206",
+  "environmentSha256": "717db92d990aee2929b6e924b238568f3ed4b96f2fab132e7d544fda41d8aabd",
+  "result": "PASS",
+  "electron": "43.6.0",
+  "checks": [
+    "native reload revokes",
+    "native renderer gone revokes",
+    "native destroyed revokes",
+    "native IPC stale result rejected",
+    "native IPC stale read rejected"
+  ]
+}
