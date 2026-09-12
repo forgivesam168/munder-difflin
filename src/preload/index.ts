@@ -574,6 +574,8 @@ export interface PreservedWorktreeSnapshot {
 
 const api = {
   version: __APP_VERSION__,
+  controlledRead: process.argv.includes('--munder-controlled-read'),
+  controlledReadProject: (): Promise<{ projectRoot: string }> => ipcRenderer.invoke('app:controlledRead'),
 
   // ─── Analytics ───────────────────────────────────────────────────────────
   /** Count ONE human-sent message (TELEMETRY.md → `message_sent`). Carries a

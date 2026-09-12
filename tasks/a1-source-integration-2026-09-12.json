@@ -1,0 +1,102 @@
+{
+  "status": "VERIFIED_BOUNDED_SOURCE_INTEGRATION_NOT_NATIVE_ACCEPTANCE",
+  "candidateDigest": "70f82c4dac362dbaf767c36928d35fcbffa7d472807676971f949ea61f0f557c",
+  "candidate": {
+    "head": "8ba3d67e0f0194ecdea171fa6e4b7d54c9ec88dc",
+    "source": {
+      "electron.vite.config.ts": "c84fe88fe6318158795903de7762ed4a4d50893ea5557ac85f7312826251cab0",
+      "src/main/bootstrap.ts": "282ec01914e3b9644fd88c4841f45b82ccef2d417a25d00c76478803ebc73e53",
+      "src/main/controlledStartup.ts": "3ea7944b30c1483e70807c44101e84b6a65b41f26bddf485c872ccfa5dcd4162",
+      "src/main/controlledApplication.ts": "aabf0c1769f3c4290b304e6bca4e1f804099e1c502afbb4a5e38833ca30a7f68",
+      "src/main/applicationWindow.ts": "8305b8b82967c89f59f800ed90e50a8e5bc9bc6ab755be0422d20e81439105e5",
+      "src/main/projectIpc.ts": "66798c8da6ca2ad8d97da40fcb2a80be0d5d1f00fb835bebd261aaf32652b259",
+      "src/main/index.ts": "6a5b5bea5ca1180d7716baef5d88ccf5586509080e08f8d860a8e4cb70582013",
+      "src/preload/index.ts": "f462efbff0b56ee8a745627e0fa6a0a8d19e6230a1546b9a7348218082a09ec1",
+      "src/renderer/src/main.tsx": "df7f98858ca677ebd5bc9ea96a0b1a8dae6e9537958c1b37d30c6880902c9753",
+      "src/renderer/src/ControlledRead.tsx": "0330a2744f86faeb7536b1d67e246ed4f0b0c688157cd5cc923b49069180da93",
+      "test/a1-controlled-read.test.cjs": "a21ae38aaccfb01a070a327afdc88418dda0c5166d6ae73d131b79fc30ac486c",
+      "test/a1-bundle.test.cjs": "3a4063997138d67f1c6692253322bc3b39fbff73df1c5314efbc5f4a025e5fe9"
+    },
+    "preservedCompatibility": {
+      "src/shared/codexRemote.ts": "dcfa018ce23f98e69966ae3e915be288a5c3645ac51a10dba7c83dabce85c75f",
+      "test/agent-token-cap.test.cjs": "6340a028d0bb8bfe75ea5c7d84bade8c61ad3b685806e1eacf8a15a8e88169cd",
+      "test/cli-install-ladder.test.cjs": "bfc9ede96ea548d69d66a4671217fc892f31630203eb842d701a37c83c1fce1a",
+      "test/codex-remote.test.cjs": "c9deccaa1c10a4b6dd38d1cba999acb3acc1518ddfcd53e181ec96e4ffccd1bc",
+      "test/transcript-project-dir.test.cjs": "ca60e7d80eb22a4057bf5e49c5d4834684751b635714d25a4579cb52871fc2cb"
+    },
+    "dependencies": {
+      "package.json": "737e17e5622f72650438b51521b55d819f13adc746297c800c773a9ac22c2583",
+      "package-lock.json": "d4ded9f75d99af31df58731b9473cb5424e578f0f4d8c8470b655a5151cd9116",
+      "tsconfig.node.json": "53ad27dbf10b78cdd5fe092851db94e5c896c61fcaca1a64f2d89cee50077d6d",
+      "tsconfig.web.json": "e2548ecba3ecea02b60291463d85d9252e9929ad4cd983b752fcbab9aff2ac0f",
+      "src/main/fs.ts": "7ac4e30ae08648b99618ec5399261059294b7b72e77a3aa264c641dcaf35d4d2",
+      "src/main/projectRoots.ts": "c17ae4adf3f9dbcd639927a03fbdbe5b4287e31be2408602f14c5f121024810b",
+      "src/main/browserSecurity.ts": "6c15f351372d619aa616bc67e1900c5b9c1b343acc4c96e95dffb1590277a672",
+      "src/shared/imageTypes.ts": "ee4be5bd55ca4a0427f74ab9b03d00305842b38449f02b92993c26aa882632a8"
+    }
+  },
+  "verification": {
+    "command": "node --test test/a1-controlled-read.test.cjs test/ide-image.test.cjs",
+    "pass": 36,
+    "skip": 1,
+    "skipReason": "Existing Windows file-symlink privilege unavailable; junction tests passed",
+    "a1Cases": 10,
+    "typecheck": "npm run typecheck: node and web exit0",
+    "bundle": "node --test test/a1-bundle.test.cjs: official main/preload/renderer build write:false; lazy graph and root-level main chunks verified",
+    "review": "Low fresh-context read-only review: no remaining blocker in bounded source scope; test outcomes evaluated by Main",
+    "diffCheck": "git diff --check exit0",
+    "historicalEvidence": "5 provenance original/copy hash pairs match; 63 of 65 source mappings unchanged, only index/preload differ as expected"
+  },
+  "runtime": {
+    "executed": false,
+    "artifact": "NOT_MATERIALIZED; do not use stale out or historical fixture package",
+    "electronVersion": "43.6.0",
+    "electronExecutableSha256": "9e1b3c401c1a1988942d5684fede8040d089b0c496ab86b899415ba9bfa0e49c",
+    "nativeGates": "all three remain false"
+  },
+  "limitations": [
+    "No native dialog/Electron/full-app/supervision/company acceptance",
+    "Environment redirection and source effect refusal are not OS sandbox or credential isolation",
+    "Revocation suppresses delivery; does not cancel or undo I/O",
+    "Concurrent same-user filesystem retargeting and hostile launchers are outside this bounded mode",
+    "Ordinary startup graph compiled, not executed",
+    "Current source invalidates historical fixture source bindings; historical receipts remain evidence only"
+  ],
+  "localCheckpoint": {
+    "scope": "Controlled A1 source integration only; compatibility cohort excluded",
+    "stagingAllowlist": [
+      "electron.vite.config.ts",
+      "src/main/bootstrap.ts",
+      "src/main/controlledStartup.ts",
+      "src/main/controlledApplication.ts",
+      "src/main/applicationWindow.ts",
+      "src/main/projectIpc.ts",
+      "src/main/index.ts",
+      "src/preload/index.ts",
+      "src/renderer/src/main.tsx",
+      "src/renderer/src/ControlledRead.tsx",
+      "test/a1-controlled-read.test.cjs",
+      "test/a1-bundle.test.cjs",
+      "tasks/a1-source-integration-2026-09-12.json",
+      "tasks/todo.md"
+    ],
+    "sourceGitBlobIds": {
+      "electron.vite.config.ts": "a81c71e4ffa13cb76668f0bf96dfac77336eefd7",
+      "src/main/bootstrap.ts": "98018ddd1468e7d359f843d963f5cca904226591",
+      "src/main/controlledStartup.ts": "a2dd4ebc729811175d52430a6f4c585b073bd01d",
+      "src/main/controlledApplication.ts": "46d74f0bacc1121b4a9e366e9ef5606625f5c701",
+      "src/main/applicationWindow.ts": "67c171db11cb9997c2431804d45f55baf80d1cb5",
+      "src/main/projectIpc.ts": "8b9d5a06be73e3d94227f5e218a9e04100ecf291",
+      "src/main/index.ts": "39d6722b918ce2de1b301d9fff5ad99918ea9df7",
+      "src/preload/index.ts": "d07dcfdd53d66c9a2fcab96146867d4dbb56e966",
+      "src/renderer/src/main.tsx": "f6b14d11a108501e6d0c181b5af776aa7eef871c",
+      "src/renderer/src/ControlledRead.tsx": "5215c0fe69b6465764fc5a3e2ff4bbfa5cd583f1",
+      "test/a1-controlled-read.test.cjs": "f69366f21912d1b087e8cb2f74372d45f5bf3f60",
+      "test/a1-bundle.test.cjs": "d2c51adb0eb20415738973e4244fe25ee1eeb250"
+    },
+    "identityNote": "candidate.source hashes preserve original worktree bytes. sourceGitBlobIds bind Git clean-filtered content (CRLF may normalize to LF). candidate.head is the pre-checkpoint base, not the commit containing this record.",
+    "evidenceNote": "Prior 36 PASS / 1 existing privilege SKIP, 10 A1 cases, typechecks and bundle review remain source-bound evidence from the recorded dirty candidate. No clean-commit full-app or native claim; no unchanged matrix rerun for checkpoint.",
+    "publicationReview": "Scoped source/tests use synthetic data only; host path in todo replaced by <REPOSITORY>. No credentials, company data, .codex, raw local evidence or artifacts included.",
+    "push": "Not authorized this cycle; origin research ref must be queried after local commit."
+  }
+}

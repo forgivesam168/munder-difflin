@@ -1,3 +1,43 @@
+# 2026-09-12 A1 local Git checkpoint
+
+本節只記錄上一輪 source integration 的 Git 封存；不實作 artifact binding／supervisor adapter，不啟動 Electron，不 push。
+
+- A VERIFIED：pre-commit branch/HEAD/index 與上一輪相同；manifest 的 source、dependency、compatibility raw hashes 及 candidate digest 全匹配；三個 native gates 仍 false。Starter hash 與上一輪相同，main 未變。
+- B：exact staging allowlist 是 manifest.localCheckpoint.stagingAllowlist 的 14 路徑；產品 source/tests 完全未變，只補 checkpoint metadata 與 todo 公開用路徑表示。既有五路徑 compatibility cohort、.codex、其他 local evidence/tmp 全部排除。
+- C：提交前逐項比對 staged source 與 sourceGitBlobIds，確認與原 worktree bytes 僅 Git clean-filtered 換行差異；review exact staged diff 與 diff --check。上一輪 36 PASS / 1 existing privilege SKIP、10 A1 cases PASS、Node/web typecheck、bundle graph 與 Low review 證據沿用，不偽稱本輪重跑或 clean-commit runtime PASS。
+- D：本檔所在 A1 source checkpoint commit 取代下方「保留未提交」的歷史狀態；full SHA 由 git log 取得，避免 self-referential commit hash。commit 後只讀查詢 origin research ref，評估正常 fast-forward；本輪不 push。
+- 公開範圍：private host root 改為 <REPOSITORY>；manifest 保留原 raw identities 並另列 Git blob mapping。沒有 credential/company data/raw logs。無 workflow 變更；此 research branch 不匹配現有 push branch/tag triggers。
+- 風險／回復：source-only local checkpoint，不代表 runtime/adoption readiness。回復須另授權 scoped revert，禁止 reset/clean 或丟棄保留 cohort。下一個 A1 obligation 不在本輪執行。
+
+# 2026-09-12 A1 正式 source integration — VERIFIED / runtime 未驗收
+
+本節是目前接手入口；下方保留歷史研究與決策，不恢復一次性 native 授權。
+
+- A VERIFIED：live HEAD `8ba3d67e0f0194ecdea171fa6e4b7d54c9ec88dc`、分支 `research/electron-security-poc`；main `3f53763fa4b82748e9e1ea6bff69e01fdfc52823`、index 空。既有 compatibility 五路徑仍為 46 additions / 20 deletions；全部既有 untracked 保留。舊 todo 的 `66cf7097` 是歷史值。
+- Reconciliation VERIFIED：5 組 provenance 原件／redacted copy hash 全匹配；65 個 snapshot source mappings 中 63 不變，index/preload 兩項是本輪必要變更。三個 native source gates 均 false，沒有重跑舊 fixture matrix；舊 source-bound receipts 不適用新 candidate。原始 31 項引用不變。
+- B VERIFIED：正式 Vite entry 現為 `src/main/bootstrap.ts`；先驗證 controlled mode，再 lazy import 受控 application 或一般 `index.ts`。受控圖不求值 config／PTY／analytics／integration services。兩種模式共用 `applicationWindow.ts` 與 `projectIpc.ts` 的正式 registration / consent / dispatch / `fs:readFile` → `readFileText`；正式 renderer entry → `ControlledRead` button → 正式 preload `readFile` → result display。
+- B effects：受控模式只註冊 `app:controlledRead` 與 `fs:readFile`，即使 project consent 通過也沒有 write/delete/Git/agent/install/config/service handler。固定 root、拒絕 UNC／runtime overrides／缺或錯誤設定、canonical empty synthetic environment directories；lstat 逐段拒絕靜態 junction 後才 realpath。Electron app-data/session/cache/log/temp 重導；renderer network、非產品 file URL、popup、download、webview、web permission 拒絕。這些是 product source 控制，不是 OS sandbox／credential isolation。
+- C VERIFIED：`node --test test/a1-controlled-read.test.cjs test/ide-image.test.cjs` → 36 PASS / 1 既有 Windows file-symlink privilege SKIP；junction cases PASS。A1 新增 10 cases 含完整 product module registration、正式 renderer button（inert hook driver）、preload、allow/deny、pending consent revoke、in-flight result suppression、重新同意、拒絕 effects／links。
+- C VERIFIED：`npm run typecheck` → Node/web exit0（Node v24.13.0）；`node --test test/a1-bundle.test.cjs` → 1 PASS，正式 main/preload/renderer 的 Vite build `write:false`，未覆寫 out；實際 chunk graph 確認 lazy service boundary、同層 main chunks、共用 registration 與 renderer read call。`git diff --check` PASS。最終 Low fresh-context 唯讀 review：本 source scope 無剩餘 blocker；測試結果由 Main 執行／判定。
+- D VERIFIED：source candidate 身分與 exact file hashes 見 [a1-source-integration-2026-09-12.json](a1-source-integration-2026-09-12.json)，digest `70f82c4dac362dbaf767c36928d35fcbffa7d472807676971f949ea61f0f557c`。12 個 source/test 路徑＋本 todo／manifest 為本輪 scope；既有 compatibility 五路徑另列且保留。形成適合 local source commit 的 coherent semantic checkpoint；本輪保留未提交 candidate，沒有為結束回合強迫 commit，沒有 stage/push。
+- 限制：React DOM／native dialog／正式 Electron／full-app／worker supervision／company readiness 都未驗收。一般模式成功路徑保留原 service graph／read contract，只有編譯／共用 handler 證據，未啟動。撤銷是抑制 stale delivery，非 I/O cancellation；concurrent same-user retargeting／惡意 launcher 不在本 bounded mode 保證內。沒有 credential/profile/company data 存取、agent／install／外部 integration 啟動。
+
+## 下一個 A1 obligation：將此正式 candidate 綁入 bounded Windows runtime 驗收（未執行）
+
+缺少正式 entry 的 supervisor/source-artifact/environment admission adapter，會讓 **正式 app launch → creation-bound supervision → finite exit/cleanup evidence** 無法安全驗收。舊 adapter 固定 research fixture，不能改 argv 後冒用其 PASS；這不影響本輪已完成的 source integration。下一轮先完成該窄 adapter／artifact identity，再請求／使用具名 runtime 授權；不再建立平行 IPC fixture。
+
+下一次 bounded run 的具體候選契約（不是執行許可）：
+
+- Candidate：上述 HEAD＋manifest digest／compatibility hashes；現有 Electron `43.6.0` 的 `node_modules/electron/dist/electron.exe` SHA256 `9e1b3c401c1a1988942d5684fede8040d089b0c496ab86b899415ba9bfa0e49c`。本輪只做 memory build，**runnable artifact 尚未 materialize/hash**；下一輪必須由這組 source 產生 `.tmp/a1-runtime-001/artifact/{main,preload,renderer}`，含正式 `main/index.js`／lazy chunks／assets，記錄完整 hash 後才可 admission，不使用舊 out 或 fixture package。
+- Synthetic root：`<REPOSITORY>/.tmp/a1-runtime-001/project`，唯一 fixture `readme.txt` 的 UTF-8 bytes 為 `A1 synthetic read\n`（末尾 LF）；不含 links/Git/company data。App-data 為 sibling `app-data`，只預建空的 `home,userprofile,appdata,localappdata,temp,tmp` 六目錄；runRoot 本輪未建立。
+- Launch：固定以上 executable、materialized `artifact/main/index.js`、唯一 flag `--munder-controlled-read`。`MUNDER_A1_PROJECT`／`MUNDER_A1_APP_DATA` 指向上述絕對路徑；HOME/USERPROFILE/APPDATA/LOCALAPPDATA/TEMP/TMP 逐一指向對應空子目錄。Supervisor 必須清空再建立已驗證 allowlist env（OS 必要值沿既有 evidence 校驗），不完整繼承、不設 provider keys／真實 CODEX_HOME／renderer dev URL／NODE_OPTIONS；不得關閉 Electron sandbox。環境重導不等於 OS 憑證隔離。
+- Effects：一次 app root＋必要 Chromium children；只載入本地 product assets、synthetic app-data/cache/log writes、上述專案 read、原生 deny/allow consent、reload/revoke、close。禁止 agent spawn/install/project mutation/Git/network/service。流程：deny 無內容 → reload → allow 顯示已知內容 → reload 要求重新同意 → close；任一未知 effect 立即停止。
+- Timeouts：一次 attempt、零 retries；app 內 hard deadline 60s（exit1）；外層 root deadline 70s，最多 10s creation-bound tree cleanup，parent hard stop 90s。若新 adapter 不能提供這些保證，停止於 admission，不 native launch。
+- Cleanup／stop：只操作該 run 的持有 handles／Job，不 PID 掃描／kill unrelated；保存 receipt、source/artifact/env 身分與 app-data，不自動刪除失敗材料。成功須有預期 read/deny/revoke 證據、root 正常退出及 Job active0；timeout、hash drift、缺 receipt、cleanup UNKNOWN、unexpected prompt/effect 一律 FAIL/UNKNOWN 並停止，沒有 fallback／下一 attempt。完成後 gates 恢復 false。
+- High risk rollout：本輪 source only，下一次 runtime 另授權。Rollback＝取消該 launch／停用受控 candidate，保留 diff/evidence；不 reset/clean、不同時回退成一般啟動。監測信號為 refusal／有限退出／source-bound result／cleanup receipt。部署／migration N/A — 本輪沒有。
+
+本輪已停止；不操作 stored Goal、main、Starter、Codex 設定，不自行開始 native run 或下一 cycle。
+
 # 2026-09-12 原始目標回復與 Windows 安全可用里程碑對齊
 
 本節為目前接手入口；下方 2026-09-11 snapshot 保留歷史證據，不是目前執行授權。

@@ -55,7 +55,9 @@ export default defineConfig({
     define: defineMain,
     build: {
       rollupOptions: {
-        input: { index: resolve(__dirname, 'src/main/index.ts') }
+        input: { index: resolve(__dirname, 'src/main/bootstrap.ts') },
+        // Dynamic service imports must stay lazy AND beside the existing sidecars.
+        output: { chunkFileNames: '[name]-[hash].js' }
       }
     }
   },
