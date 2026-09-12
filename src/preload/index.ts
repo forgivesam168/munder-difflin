@@ -576,6 +576,7 @@ const api = {
   version: __APP_VERSION__,
   controlledRead: process.argv.includes('--munder-controlled-read'),
   controlledReadProject: (): Promise<{ projectRoot: string }> => ipcRenderer.invoke('app:controlledRead'),
+  controlledReadReady: (): Promise<void> => ipcRenderer.invoke('app:controlledReadReady'),
   controlledReadDisplayed: (content: string): Promise<void> => ipcRenderer.invoke('app:controlledReadDisplayed', content),
 
   // ─── Analytics ───────────────────────────────────────────────────────────

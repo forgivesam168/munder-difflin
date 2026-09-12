@@ -7,6 +7,7 @@ const path = require('node:path');
 const vm = require('node:vm');
 const { EventEmitter } = require('node:events');
 const { pathToFileURL } = require('node:url');
+const binding = require('../tools/a1-candidate.cjs');
 const ts = require('typescript');
 const repo = path.resolve(__dirname, '..');
 const envKeys = ['HOME', 'USERPROFILE', 'APPDATA', 'LOCALAPPDATA', 'TEMP', 'TMP'];
@@ -68,8 +69,9 @@ function runtime(mode, options = {}) {
     file = path.resolve(file);
     if (cache.has(file)) return cache.get(file).exports;
     loaded.push(path.relative(repo, file).replaceAll('\\', '/'));
+    if (file.endsWith('.json')) return JSON.parse(fs.readFileSync(file, 'utf8'));
     const source = fs.readFileSync(file, 'utf8');
-    const code = ts.transpileModule(source, { compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022, jsx: ts.JsxEmit.ReactJSX } }).outputText;
+    const code = ts.transpileModule(source, { compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022, jsx: ts.JsxEmit.ReactJSX, esModuleInterop: true } }).outputText;
     const module = { exports: {} }; cache.set(file, module);
     function requireProduct(id) {
       if (id === 'electron') return electron;
@@ -82,14 +84,17 @@ function runtime(mode, options = {}) {
       } };
       if (['node:fs', 'node:path', 'node:os', 'node:url', 'node:crypto'].includes(id)) return require(id);
       if (!id.startsWith('.')) throw new Error(`Forbidden module import: ${id}`);
-      const target = path.resolve(path.dirname(file), `${id}.ts`);
+      const target = path.resolve(path.dirname(file), id.endsWith('.json') ? id : `${id}.ts`);
+      if (id.endsWith('/a1-contract.json')) return load(target);
       const allowed = ['bootstrap', 'controlledAcceptance', 'controlledStartup', 'controlledApplication', 'applicationWindow', 'projectIpc', 'projectRoots', 'browserSecurity', 'fs', 'imageTypes'];
       if (!allowed.includes(path.basename(target, '.ts'))) throw new Error(`Forbidden service import: ${id}`);
       return load(target);
     }
     vm.runInNewContext('(function(require,module,exports,__dirname){' + code + '\n})', {
       process: { argv: ['node', 'app', '--munder-controlled-read'], env: mode.env, platform: process.platform },
-      window: rendererWindow, console: { error: () => undefined }, Error, URL, Buffer, setTimeout, clearTimeout, __APP_VERSION__: 'test'
+      window: rendererWindow, console: { error: () => undefined }, Error, URL, Buffer,
+      performance: options.clock ? {now: options.clock.now} : performance,
+      setTimeout: options.clock?.setTimeout || setTimeout, clearTimeout: options.clock?.clearTimeout || clearTimeout, __APP_VERSION__: 'test'
     }, { filename: file })(requireProduct, module, module.exports, path.dirname(file));
     return module.exports;
   }
@@ -97,7 +102,14 @@ function runtime(mode, options = {}) {
     get api() { return api; }, get consentCalls() { return consentCalls; }, get reads() { return reads; } };
 }
 async function start(t, options) {
-  const mode = fixture(t), r = runtime(mode, options);
+  const mode = fixture(t);
+  if (options?.bound) {
+    const candidate={runId:binding.runId,contract:binding.contract,configurationSha256:'b'.repeat(64)};
+    fs.writeFileSync(path.join(path.dirname(mode.appData),'candidate.json'),JSON.stringify(candidate));
+    const request=binding.request({candidateSha256:binding.digest(candidate),candidate},'c'.repeat(64));
+    fs.writeFileSync(path.join(path.dirname(mode.appData),'request.json'),JSON.stringify(request));
+  }
+  const r = runtime(mode, options);
   t.after(() => r.app.emit('will-quit'));
   await r.load(path.join(repo, 'src/main/controlledApplication.ts')).startControlledApplication(mode);
   r.load(path.join(repo, 'src/preload/index.ts'));
@@ -105,7 +117,7 @@ async function start(t, options) {
 }
 test('formal registration -> production preload -> consent -> readFileText -> result; effects refused', async t => {
   const { mode, r } = await start(t);
-  assert.deepEqual([...r.handlers.keys()].sort(), ['app:controlledRead', 'app:controlledReadDisplayed', 'fs:readFile']);
+  assert.deepEqual([...r.handlers.keys()].sort(), ['app:controlledRead', 'app:controlledReadDisplayed', 'app:controlledReadReady', 'fs:readFile']);
   assert.equal(r.api.controlledRead, true);
   assert.equal((await r.api.controlledReadProject()).projectRoot, mode.projectRoot);
   const result = await r.api.readFile(mode.projectRoot, 'readme.txt');
@@ -207,20 +219,22 @@ test('official bootstrap loads controlled graph only and catches malformed launc
 for (const decision of [0, 1]) test(`actual controlled renderer action through preload; consent=${decision}`, async t => {
   // Inert hook driver evaluates the complete component and its actual button action.
   // This proves source wiring, not React DOM/native rendering or scheduling.
-  const state = [], effects = [];
-  let cursor = 0, mounted = false;
+  const state = [], effects = [], dependencies = [];
+  let cursor = 0, effectCursor = 0;
   const react = {
     useState: initial => { const slot = cursor++; if (!(slot in state)) state[slot] = initial; return [state[slot], value => { state[slot] = value; }]; },
     useRef: initial => { const slot = cursor++; if (!(slot in state)) state[slot] = { current: initial }; return state[slot]; },
-    useEffect: effect => { if (!mounted) effects.push(effect); }
+    useEffect: (effect, deps) => { const slot=effectCursor++; if (!dependencies[slot] || deps.some((v,i)=>v!==dependencies[slot][i])) { dependencies[slot]=deps; effects.push(effect); } }
   };
   const { r } = await start(t, { react, consent: () => decision });
   // The component reads the same exposed bridge that Electron would put on window.
   const { ControlledRead } = r.load(path.join(repo, 'src/renderer/src/ControlledRead.tsx'));
-  const render = () => { cursor = 0; return ControlledRead(); };
-  render(); mounted = true;
-  for (const effect of effects) { const cleanup = effect(); if (cleanup) t.after(cleanup); }
-  await new Promise(resolve => setImmediate(resolve));
+  const render = () => { cursor = 0; effectCursor = 0; return ControlledRead(); };
+  for (let pass=0;pass<3;pass++) {
+    render();
+    for (const effect of effects.splice(0)) { const cleanup=effect(); if(cleanup)t.after(cleanup); }
+    await new Promise(resolve=>setImmediate(resolve));
+  }
   function elements(node) {
     if (!node || typeof node !== 'object') return [];
     const children = node.props?.children;
@@ -246,4 +260,56 @@ test('controlled startup and read refuse static junctions before following targe
   fs.symlinkSync(mode.projectRoot, other.projectRoot, process.platform === 'win32' ? 'junction' : 'dir');
   const { controlledStartup } = r.load(path.join(repo, 'src/main/controlledStartup.ts'));
   assert.throws(() => controlledStartup(['--munder-controlled-read'], other.env), /linked paths/);
+});
+
+
+test('bound product Ready uses trusted preload IPC and wrong sequence persists diagnostics', async t => {
+  let now=0,id=0;const timers=new Map();
+  const clock={now:()=>now,setTimeout(fn,ms){const key=++id;timers.set(key,{fn,at:now+ms});return key;},clearTimeout(key){timers.delete(key);}};
+  const {mode,r}=await start(t,{bound:true,clock});
+  const handler=r.handlers.get('app:controlledReadReady');
+  const wc=r.windows[0].webContents;
+  assert.throws(()=>handler({sender:wc,senderFrame:{url:'https://untrusted.invalid'}}),/Untrusted/);
+  assert.equal([...timers.values()][0].at,binding.contract.phaseMs.startup);
+  now=1000;await r.api.controlledReadReady();
+  const due=[...timers.values()][0].at;assert.equal(due,1000+binding.contract.phaseMs.human);
+  now=2000;wc.emit('did-start-navigation',{isMainFrame:true,isSameDocument:false});
+  // A reload before the required deny is a sequence failure, not renewed timing.
+  const result=JSON.parse(fs.readFileSync(path.join(mode.appData,'a1-result.json')));
+  assert.equal(result.reason,'SEQUENCE_MISMATCH');assert.equal(result.phase,'human');assert.deepEqual(result.events,['reload']);assert.deepEqual(r.exits,[1]);
+});
+
+test('bound product renderer-gone and startup timeout write different terminal reasons', async t => {
+  for (const reason of ['RENDERER_GONE','STARTUP_TIMEOUT','HUMAN_INTERACTION_TIMEOUT']) {
+    let now=0,id=0;const timers=new Map();
+    const clock={now:()=>now,setTimeout(fn,ms){const key=++id;timers.set(key,{fn,at:now+ms});return key;},clearTimeout(key){timers.delete(key);}};
+    const {mode,r}=await start(t,{bound:true,clock});
+    if(reason==='RENDERER_GONE')r.windows[0].webContents.emit('render-process-gone');
+    else {
+      if(reason==='HUMAN_INTERACTION_TIMEOUT')await r.api.controlledReadReady();
+      const timer=[...timers.values()][0];now=timer.at;timer.fn();
+    }
+    const result=JSON.parse(fs.readFileSync(path.join(mode.appData,'a1-result.json')));
+    const request=JSON.parse(fs.readFileSync(path.join(path.dirname(mode.appData),'request.json')));
+    binding.validateResult(result,request,{allowFailure:true});assert.equal(result.reason,reason);assert.deepEqual(r.exits,[1]);
+  }
+});
+
+test('renderer loss after completed close still forces failed root without rewriting terminal result', async t => {
+  let decision=0;
+  const {mode,r}=await start(t,{bound:true,consent:()=>decision});
+  const wc=r.windows[0].webContents;
+  await r.api.controlledReadReady();
+  assert.equal((await r.api.readFile(mode.projectRoot,'readme.txt')).ok,false);
+  for(let pass=0;pass<2;pass++) {
+    wc.emit('did-start-navigation',{isMainFrame:true,isSameDocument:false});
+    await r.api.controlledReadReady();decision=1;
+    const result=await r.api.readFile(mode.projectRoot,'readme.txt');assert.equal(result.ok,true);
+    await r.api.controlledReadDisplayed(result.content);
+  }
+  r.windows[0].emit('close');
+  const before=fs.readFileSync(path.join(mode.appData,'a1-result.json'));
+  assert.equal(JSON.parse(before).reason,'PASS');
+  wc.emit('render-process-gone');wc.emit('render-process-gone');
+  assert.deepEqual(r.exits,[1]);assert.deepEqual(fs.readFileSync(path.join(mode.appData,'a1-result.json')),before);
 });

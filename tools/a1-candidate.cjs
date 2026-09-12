@@ -5,11 +5,12 @@ const crypto = require('node:crypto');
 const assert = require('node:assert/strict');
 const cp = require('node:child_process');
 const root = path.resolve(__dirname, '..');
-const baseline = 'e7a8ae4e2930ed4157163dfb36b3a7035e8846ff';
-const runId = 'a1-native-001';
+const baseline = '40c4aefc227358b949bcf190119cf4c96f98c52a';
+const contract = require('../src/shared/a1-contract.json');
+const runId = contract.runId;
 const run = path.join(root, '.tmp', runId);
-const manifestFile = path.join(root, 'tasks/a1-admission-candidate.json');
-const overlay = ['src/main/controlledAcceptance.ts', 'src/main/controlledApplication.ts', 'src/main/projectIpc.ts', 'src/preload/index.ts', 'src/renderer/src/ControlledRead.tsx'];
+const manifestFile = path.join(root, 'tasks/a1-admission-candidate-002.json');
+const overlay = ['src/main/controlledAcceptance.ts', 'src/main/controlledApplication.ts', 'src/shared/a1-contract.json', 'src/preload/index.ts', 'src/renderer/src/ControlledRead.tsx'];
 const adapterFiles = ['tools/a1-candidate.cjs', 'tools/a1-build.cjs', 'tools/a1-admission.cjs', 'tools/a1-supervisor.ps1', 'tools/windows-lifecycle-transport.cjs', 'tools/research-job-preflight.ps1', 'tools/research-write-receipt.cjs'];
 const hash = bytes => crypto.createHash('sha256').update(bytes).digest('hex');
 const digest = value => hash(JSON.stringify(value));
@@ -52,14 +53,29 @@ function paths() {
   return { run, entry: path.join(run, 'artifact/main/index.js'), executable: path.join(root, 'node_modules/electron/dist/electron.exe'),
     powershell: 'C:\\Program Files\\PowerShell\\7\\pwsh.exe', project: path.join(run, 'project'), appData: path.join(run, 'app-data') };
 }
+function timeouts(value = contract) {
+  assert.deepEqual(value, contract, 'A1 contract drift');
+  for (const n of [...Object.values(value.phaseMs), ...Object.values(value.supervisorMs), value.unboundMs])
+    assert.ok(Number.isSafeInteger(n) && n > 0 && n < 2147483647, 'Invalid bounded timer');
+  const inner = Object.values(value.phaseMs).reduce((a, b) => a + b, 0);
+  const { bootstrap, launchMargin, cleanup, outerMargin, fallback } = value.supervisorMs;
+  const workload = inner + launchMargin;
+  const outer = bootstrap + workload + cleanup + outerMargin;
+  assert.ok(inner < workload && workload + cleanup < outer && outer + fallback < 2147483647);
+  return { ...value.phaseMs, bootstrap, launchMargin, workload, cleanup, outerMargin, outer, fallback };
+}
+function validateTimeouts(candidate) {
+  assert.deepEqual(candidate.contract, contract, 'Missing or mismatched A1 contract');
+  assert.deepEqual(candidate.timeouts, timeouts(candidate.contract), 'Inconsistent A1 timing budgets');
+}
 function verify({ fresh = true } = {}) {
   const manifest = JSON.parse(fs.readFileSync(safe(manifestFile), 'utf8'));
   assert.equal(manifest.version, 1); assert.equal(manifest.candidate.sourceCommit, baseline);
   assert.equal(digest(manifest.candidate), manifest.candidateSha256);
   const c = manifest.candidate;
   assert.equal(hash(fs.readFileSync(safe(path.join(run,'candidate.json')))),manifest.candidateSha256,'Candidate payload drift');
-  assert.equal(c.runId, runId); assert.deepEqual(c.invocation, { executable: 'node_modules/electron/dist/electron.exe', entry: '.tmp/a1-native-001/artifact/main/index.js', args: ['--munder-controlled-read'] });
-  assert.deepEqual(c.timeouts, { app: 60000, bootstrap: 30000, workload: 70000, cleanup: 10000, outer: 115000, fallback: 5000 });
+  assert.equal(c.runId, runId); assert.deepEqual(c.invocation, { executable: 'node_modules/electron/dist/electron.exe', entry: '.tmp/a1-native-002/artifact/main/index.js', args: ['--munder-controlled-read'] });
+  validateTimeouts(c);
   assert.deepEqual(Object.keys(c.adapterSha256).sort(), [...adapterFiles].sort());
   for (const [p,h] of Object.entries(c.adapterSha256)) assert.equal(hash(fs.readFileSync(safe(path.join(root,p)))),h,'Adapter drift');
   assert.deepEqual(Object.keys(c.overlaySha256).sort(), [...overlay].sort());
@@ -88,8 +104,26 @@ function request(manifest, nonce) {
   assert.match(nonce,/^[a-f0-9]{64}$/);
   return {version:1,runId,candidateSha256:manifest.candidateSha256,environmentSha256:manifest.candidate.configurationSha256,nonce};
 }
-function validateResult(result, req) {
-  assert.deepEqual(result,{version:1,runId,candidateSha256:req.candidateSha256,nonce:req.nonce,requestSha256:hash(JSON.stringify(req)),result:'PASS',events:['deny','reload','allow','read','display','reload','allow','read','display']});
+function validateResult(result, req, { allowFailure = false } = {}) {
+  assert.deepEqual(Object.keys(result).sort(), ['version','runId','candidateSha256','nonce','requestSha256','result','phase','reason','events'].sort());
+  assert.equal(result.version, contract.version); assert.equal(result.runId, runId);
+  assert.equal(result.candidateSha256, req.candidateSha256); assert.equal(result.nonce, req.nonce);
+  assert.equal(result.requestSha256, hash(JSON.stringify(req)));
+  const sequence = ['deny','reload','allow','read','display','reload','allow','read','display'];
+  assert.ok(['startup','human','close'].includes(result.phase));
+  assert.ok(Array.isArray(result.events) && result.events.length <= sequence.length + 1 && result.events.every(e => typeof e === 'string'));
+  if (result.result === 'PASS') {
+    assert.equal(result.reason, 'PASS'); assert.equal(result.phase, 'close'); assert.deepEqual(result.events, sequence);
+  } else {
+    assert.equal(result.result, 'FAIL');
+    assert.ok(['STARTUP_TIMEOUT','HUMAN_INTERACTION_TIMEOUT','CLOSE_TIMEOUT','RENDERER_GONE','SEQUENCE_MISMATCH','NORMAL_CLOSE_INCOMPLETE'].includes(result.reason));
+    const timeoutPhase = { STARTUP_TIMEOUT:'startup', HUMAN_INTERACTION_TIMEOUT:'human', CLOSE_TIMEOUT:'close' }[result.reason];
+    if (timeoutPhase) assert.equal(result.phase, timeoutPhase);
+    if (result.reason !== 'SEQUENCE_MISMATCH') assert.deepEqual(result.events, sequence.slice(0, result.events.length));
+    if (result.phase === 'startup' && result.reason !== 'SEQUENCE_MISMATCH') assert.deepEqual(result.events, []);
+    if (result.phase === 'close' && result.reason !== 'SEQUENCE_MISMATCH') assert.deepEqual(result.events, sequence);
+    assert.ok(allowFailure, 'A1 task failed: ' + result.reason);
+  }
   return result;
 }
-module.exports={root,baseline,runId,run,manifestFile,overlay,adapterFiles,hash,digest,git,safe,inventory,environment,validateEnvironment,paths,verify,request,validateResult};
+module.exports={root,baseline,runId,run,manifestFile,overlay,adapterFiles,hash,digest,git,safe,inventory,environment,validateEnvironment,paths,verify,request,validateResult,contract,timeouts,validateTimeouts};

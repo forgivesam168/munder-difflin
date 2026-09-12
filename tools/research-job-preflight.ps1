@@ -45,10 +45,10 @@ public static class ResearchEmptyJob {
         if (elapsed < 0) throw new ArgumentOutOfRangeException("elapsed");
         return elapsed >= budget ? 0u : budget - (uint)elapsed;
     }
-    public static uint MonitorRemaining(long workloadElapsed, uint workloadBudget, long cleanupElapsed, bool lifecycle = false) {
+    public static uint MonitorRemaining(long workloadElapsed, uint workloadBudget, long cleanupElapsed, bool lifecycle = false, uint a1CleanupMs = 0) {
         // Negative cleanup elapsed means termination has not succeeded yet.
         return cleanupElapsed < 0 ? RemainingMilliseconds(workloadElapsed, workloadBudget)
-            : RemainingMilliseconds(cleanupElapsed, lifecycle ? 10000u : 2000u);
+            : RemainingMilliseconds(cleanupElapsed, a1CleanupMs > 0 ? a1CleanupMs : lifecycle ? 10000u : 2000u);
     }
     public static string QuoteArgument(string value) {
         if (value == null || value.IndexOf('\0') >= 0) throw new ArgumentException("Invalid argument");
@@ -214,10 +214,21 @@ public static class ResearchEmptyJob {
         public int Code;
         public TerminationProbeFailure(int code) { Code = code; }
     }
-    // Pure fixed selector: no executable/argv/budget extension point for A1.
+    // Pure derivation from the hash-bound A1 contract. No native effects.
+    public static uint[] A1Timing(uint startup, uint human, uint close, uint launchMargin,
+        uint cleanup, uint bootstrap, uint outerMargin, uint fallback) {
+        foreach (uint value in new uint[] { startup, human, close, launchMargin, cleanup, bootstrap, outerMargin, fallback })
+            if (value == 0) throw new ArgumentException("Positive A1 budget required");
+        ulong inner = (ulong)startup + human + close;
+        ulong workload = inner + launchMargin;
+        ulong outer = bootstrap + workload + cleanup + outerMargin;
+        if (outer + fallback >= int.MaxValue) throw new ArgumentException("A1 budget overflow");
+        return new uint[] { (uint)workload, cleanup, (uint)outer };
+    }
+    // Pure fixed executable/argv/root selector for the current A1 candidate.
     public static string A1Command(string executable, string entry, string run) {
         if (!System.IO.Path.IsPathFullyQualified(run) || System.IO.Path.GetFullPath(run) != run ||
-            System.IO.Path.GetFileName(run) != "a1-native-001" ||
+            System.IO.Path.GetFileName(run) != "a1-native-002" ||
             System.IO.Path.GetFileName(System.IO.Path.GetDirectoryName(run)) != ".tmp")
             throw new ArgumentException("Fixed A1 run required");
         string repository = System.IO.Path.GetDirectoryName(System.IO.Path.GetDirectoryName(run));
@@ -226,7 +237,7 @@ public static class ResearchEmptyJob {
             throw new ArgumentException("Fixed A1 executable and entry required");
         return QuoteArgument(executable) + " " + QuoteArgument(entry) + " " + QuoteArgument("--munder-controlled-read");
     }
-    public static AdmissionResult Admit(string executable, bool descendant, string fixture, bool forceDeadline, bool closeJob, bool receiptFault, bool crashHelper, System.Collections.IDictionary childEnvironment, bool rootFailure = false, bool rootTimeout = false, bool queryFault = false, bool runningQueryFault = false, bool terminationFault = false, bool workloadTimeout = false, bool explicitEnvironment = false, bool lifecycleSuspended = false, bool lifecycleRunning = false, bool lifecycleStopProbe = false, bool controlledA1 = false) {
+    public static AdmissionResult Admit(string executable, bool descendant, string fixture, bool forceDeadline, bool closeJob, bool receiptFault, bool crashHelper, System.Collections.IDictionary childEnvironment, bool rootFailure = false, bool rootTimeout = false, bool queryFault = false, bool runningQueryFault = false, bool terminationFault = false, bool workloadTimeout = false, bool explicitEnvironment = false, bool lifecycleSuspended = false, bool lifecycleRunning = false, bool lifecycleStopProbe = false, bool controlledA1 = false, uint a1WorkloadMs = 0, uint a1CleanupMs = 0) {
         if (!System.IO.Path.IsPathFullyQualified(executable) || executable.Contains("\""))
             throw new ArgumentException("Absolute executable required");
         if (lifecycleSuspended && (!closeJob || descendant || forceDeadline || receiptFault || crashHelper || rootFailure || rootTimeout || queryFault || runningQueryFault || terminationFault || workloadTimeout || explicitEnvironment || !System.IO.Path.IsPathFullyQualified(fixture)))
@@ -237,7 +248,9 @@ public static class ResearchEmptyJob {
         if (controlledA1) {
             if (!lifecycleRunning || lifecycleStopProbe) throw new ArgumentException("A1 requires plain running lifecycle");
             A1Command(executable, fixture, Environment.CurrentDirectory);
-        }
+            if (a1WorkloadMs == 0 || a1CleanupMs == 0 || (ulong)a1WorkloadMs + a1CleanupMs >= int.MaxValue)
+                throw new ArgumentException("Bound A1 budgets required");
+        } else if (a1WorkloadMs != 0 || a1CleanupMs != 0) throw new ArgumentException("A1-only budgets");
         IntPtr job = CreateJobObjectW(IntPtr.Zero, null);
         if (job == IntPtr.Zero) throw new Win32Exception(Marshal.GetLastWin32Error());
         IntPtr attributes = IntPtr.Zero, jobValue = IntPtr.Zero, environment = IntPtr.Zero;
@@ -280,7 +293,7 @@ public static class ResearchEmptyJob {
             if (runningQueryFault && (System.IO.File.Exists(queryReady) || System.IO.Directory.Exists(queryReady)))
                 throw new InvalidOperationException("Query readiness path already exists");
             var workloadClock = System.Diagnostics.Stopwatch.StartNew();
-            uint workloadBudget = controlledA1 ? 70000u : lifecycleRunning ? 40000u : rootTimeout ? 200u : workloadTimeout ? 1500u : descendant ? 8000u : 5000u;
+            uint workloadBudget = controlledA1 ? a1WorkloadMs : lifecycleRunning ? 40000u : rootTimeout ? 200u : workloadTimeout ? 1500u : descendant ? 8000u : 5000u;
             Check(CreateProcessW(executable, command, IntPtr.Zero, IntPtr.Zero, false,
                 0x08080400u | ((closeJob || receiptFault || (queryFault && !runningQueryFault) || (crashHelper && !descendant)) ? 4u : 0u), environment, Environment.CurrentDirectory, ref startup, out child));
             // CREATE_NO_WINDOW | EXTENDED_STARTUPINFO_PRESENT | CREATE_UNICODE_ENVIRONMENT
@@ -351,7 +364,7 @@ public static class ResearchEmptyJob {
                 Check(TerminateJobObject(job, 124));
                 terminated = true;
                 cleanupClock = System.Diagnostics.Stopwatch.StartNew();
-                if (WaitForSingleObject(child.Process, MonitorRemaining(workloadClock.ElapsedMilliseconds, workloadBudget, cleanupClock.ElapsedMilliseconds, lifecycleRunning)) != 0)
+                if (WaitForSingleObject(child.Process, MonitorRemaining(workloadClock.ElapsedMilliseconds, workloadBudget, cleanupClock.ElapsedMilliseconds, lifecycleRunning, a1CleanupMs)) != 0)
                     throw new InvalidOperationException("Timed-out root cleanup unverified");
             } else if (waitResult != 0) {
                 throw new InvalidOperationException("Child wait failed");
@@ -398,7 +411,7 @@ public static class ResearchEmptyJob {
                     cleanupClock = System.Diagnostics.Stopwatch.StartNew();
                 }
                 System.Threading.Thread.Sleep(20);
-            } while (cleanupClock == null || MonitorRemaining(workloadClock.ElapsedMilliseconds, workloadBudget, cleanupClock.ElapsedMilliseconds, lifecycleRunning) > 0);
+            } while (cleanupClock == null || MonitorRemaining(workloadClock.ElapsedMilliseconds, workloadBudget, cleanupClock.ElapsedMilliseconds, lifecycleRunning, a1CleanupMs) > 0);
             throw new InvalidOperationException("Job accounting mismatch: active=" + lastActive + ", total=" + lastTotal);
         } catch (TerminationProbeFailure error) {
             failureEvidence = new AdmissionResult { Member = true,

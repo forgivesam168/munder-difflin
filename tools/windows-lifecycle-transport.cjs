@@ -3,7 +3,7 @@ const assert = require('node:assert/strict');
 // Shared internal transport extracted from the verified research parent. Callers
 // own fixed admission, identity and authorization; this module has no CLI.
 module.exports = function transport({ powershell, helperArgs, run, env, receipt, persist,
-  accept, mode, test = {}, spawn, setTimeout = global.setTimeout, clearTimeout = global.clearTimeout, outerMs = 85000 }) {
+  accept, inspect = () => {}, mode, test = {}, spawn, setTimeout = global.setTimeout, clearTimeout = global.clearTimeout, outerMs = 85000, bootstrapMs = 30000, fallbackMs = 5000 }) {
   const save = () => {
     try { persist(); } catch { receipt.persistenceFailed = true; receipt.result = 'FAIL'; }
   };
@@ -23,6 +23,7 @@ module.exports = function transport({ powershell, helperArgs, run, env, receipt,
         assert.equal(n.Member, true); assert.equal(n.ActiveProcesses, 0);
         // Cleanup is independent of assertion/workload success, including storage faults.
         receipt.cleanup = 'VERIFIED_EMPTY'; receipt.native = n;
+        inspect(complete);
         assert.equal(n.ChildExit, 0);
         for (const key of ['TimedOut', 'RootFailed', 'RootTimedOut', 'TerminationSucceeded', 'ReceiptWriteFailed', 'SuspendedBeforeClose']) assert.equal(n[key], false);
         assert.equal(n.QueryErrorCode, null); assert.equal(n.TerminationErrorCode, null);
@@ -41,13 +42,13 @@ module.exports = function transport({ powershell, helperArgs, run, env, receipt,
       fallback = setTimeout(() => {
         child.stdin.destroy(); child.stdout.destroy(); child.stderr.destroy(); child.unref();
         finish(null, null, true);
-      }, 5000);
+      }, fallbackMs);
     };
     try {
       child = spawn(powershell, helperArgs,
       { cwd: run, env, windowsHide: true, stdio: ['pipe', 'pipe', 'pipe'] });
     } catch { fail('spawn'); finish(null, null); return; }
-    bootstrap = setTimeout(() => stop('bootstrap-timeout'), 30000);
+    bootstrap = setTimeout(() => stop('bootstrap-timeout'), bootstrapMs);
     outer = setTimeout(() => stop('outer-timeout'), outerMs);
     child.on('error', () => { fail('helper-error'); });
     child.stdin.on('error', () => stop('input-error'));

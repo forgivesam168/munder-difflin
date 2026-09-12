@@ -7,11 +7,14 @@ import type { ControlledStartup } from './controlledStartup';
 import { createApplicationWindow } from './applicationWindow';
 import { registerProjectAccess } from './projectIpc';
 import { isTrustedRendererIpc } from './browserSecurity';
+import contract from '../shared/a1-contract.json';
 import { controlledAcceptance } from './controlledAcceptance';
 
 /** Controlled mode of the product entry; no service/config/worker graph is loaded. */
 export async function startControlledApplication(mode: ControlledStartup): Promise<void> {
-  const acceptance = controlledAcceptance(mode);
+  let failureExitRequested = false;
+  const fail = (): void => { if (!failureExitRequested) { failureExitRequested = true; app.exit(1); } };
+  const acceptance = controlledAcceptance(mode, fail);
   for (const key of ['appData', 'userData', 'sessionData', 'logs', 'crashDumps', 'temp'] as const) {
     const path = join(mode.appData, key);
     mkdirSync(path, { recursive: true });
@@ -30,14 +33,21 @@ export async function startControlledApplication(mode: ControlledStartup): Promi
     }
     acceptance?.display(content);
   });
+  ipcMain.handle('app:controlledReadReady', event => {
+    if (!isTrustedRendererIpc(event, documentUrl, [...windows].some(win => win.webContents === event.sender))) {
+      throw new Error('Untrusted controlled Ready sender');
+    }
+    acceptance?.ready();
+  });
   ipcMain.handle('app:controlledRead', event => {
     if (!isTrustedRendererIpc(event, documentUrl, [...windows].some(win => win.webContents === event.sender))) {
       throw new Error('Untrusted controlled startup sender');
     }
     return { projectRoot: mode.projectRoot };
   });
-  const deadline = setTimeout(() => { try { acceptance?.finish(false); } finally { app.exit(1); } }, 60_000);
-  app.on('will-quit', () => clearTimeout(deadline));
+  // Preserve the pre-admission controlled UI's existing bound when no request exists.
+  const deadline = acceptance ? undefined : setTimeout(fail, contract.unboundMs);
+  app.on('will-quit', () => { clearTimeout(deadline); acceptance?.dispose(); });
   app.on('window-all-closed', () => app.quit());
   await app.whenReady();
   Menu.setApplicationMenu(null);
@@ -52,9 +62,9 @@ export async function startControlledApplication(mode: ControlledStartup): Promi
   wc.on('did-start-navigation', details => {
     if (details.isMainFrame && !details.isSameDocument) { revoke(); if (loaded) acceptance?.observe('reload'); }
   });
-  wc.on('render-process-gone', () => { revoke(); try { acceptance?.finish(false); } finally { app.exit(1); } });
+  wc.on('render-process-gone', () => { revoke(); try { acceptance?.rendererGone(); } finally { fail(); } });
   wc.on('destroyed', revoke);
-  win.on('close', () => { try { acceptance?.finish(true); } catch { app.exit(1); } });
+  win.on('close', () => { try { acceptance?.finish(); } catch { fail(); } });
   win.on('closed', () => { revoke(); windows.delete(win); });
   wc.setWindowOpenHandler(() => ({ action: 'deny' }));
   wc.on('will-navigate', event => event.preventDefault());

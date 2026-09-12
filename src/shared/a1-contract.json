@@ -1,0 +1,7 @@
+{
+  "version": 2,
+  "runId": "a1-native-002",
+  "phaseMs": { "startup": 30000, "human": 300000, "close": 15000 },
+  "supervisorMs": { "bootstrap": 30000, "launchMargin": 10000, "cleanup": 10000, "outerMargin": 5000, "fallback": 5000 },
+  "unboundMs": 60000
+}

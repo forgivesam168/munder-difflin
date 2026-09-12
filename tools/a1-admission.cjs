@@ -24,17 +24,20 @@ async function run() {
   persist();
   return require('./windows-lifecycle-transport.cjs')({powershell:binding.paths().powershell,
     helperArgs:['-NoLogo','-NoProfile','-NonInteractive','-File',path.join(binding.root,'tools/a1-supervisor.ps1')],
-    run:binding.run,env:binding.environment(manifest.candidate.systemRoot,true),receipt,persist,mode:{success:'A1_PASS'},outerMs:115000,
+    run:binding.run,env:binding.environment(manifest.candidate.systemRoot,true),receipt,persist,mode:{success:'A1_PASS'},outerMs:manifest.candidate.timeouts.outer,
+    bootstrapMs:manifest.candidate.timeouts.bootstrap,fallbackMs:manifest.candidate.timeouts.fallback,
     spawn:require('node:child_process').spawn,
-    accept:complete=>{
+    inspect:complete=>{
       assert.equal(complete.candidateSha256,manifest.candidateSha256);
       assert.equal(complete.requestSha256,binding.digest(req));
       binding.verify({fresh:false});
       const raw=fs.readFileSync(binding.safe(path.join(binding.paths().appData,'a1-result.json')));
-      binding.validateResult(JSON.parse(raw),req);
+      const terminal=binding.validateResult(JSON.parse(raw),req,{allowFailure:true});
+      receipt.terminal={result:terminal.result,phase:terminal.phase,reason:terminal.reason};
       assert.deepEqual(JSON.parse(fs.readFileSync(binding.safe(path.join(binding.run,'request.json')))),req);
       receipt.resultSha256=binding.hash(raw);
-    }});
+    },
+    accept:()=>assert.equal(receipt.terminal.result,'PASS')});
 }
 if(require.main===module) {
   const arg=process.argv.slice(2);assert.ok(arg.length===1&&['--verify','--run'].includes(arg[0]),'Only --verify or --run accepted');
