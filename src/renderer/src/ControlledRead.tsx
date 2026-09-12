@@ -6,6 +6,9 @@ export function ControlledRead(): JSX.Element {
   const [content, setContent] = useState('');
   const [status, setStatus] = useState('Loading project…');
   const [busy, setBusy] = useState(false);
+  useEffect(() => {
+    if (content) void window.cth.controlledReadDisplayed(content).catch(() => setStatus('Result acknowledgement failed'));
+  }, [content]);
   const active = useRef(false);
   useEffect(() => {
     active.current = true;

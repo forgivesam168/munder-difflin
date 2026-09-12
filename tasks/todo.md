@@ -1,3 +1,24 @@
+# 2026-09-12 A1 admission immutable local checkpoint
+
+- A/C VERIFIED：HEAD baseline `e7a8ae4e2930ed4157163dfb36b3a7035e8846ff`；既有 source/test hashes 匹配，沿用 24 tests／5 pure selector checks／Node-web typecheck 證據，不重跑未變 matrix。重新執行 artifact admission `--verify` 核對原 candidate；沒有 build 或 native run。
+- B/D：exact 18-file allowlist 與 source Git blob mapping 見 manifest.localCheckpoint；candidate payload/digest 不變。parent/binding 為共用 transport extraction 的必要 companion，另記 hashes；Git clean-filtered 換行不冒充 raw-byte 相等。manifest 不嵌入即將產生的 commit SHA，以實際 Git tree 核對。
+- 本節所在 local semantic commit 固化下方 source candidate，取代「保留未提交」狀態。commit 後只讀查詢 origin research branch；push 與 native acceptance 均需後續 Human 授權。保留 compatibility 五檔與其他 untracked，main／Starter／native gates 不變。
+
+# 2026-09-12 A1 artifact / production admission integration
+
+- A VERIFIED：HEAD `e7a8ae4e2930ed4157163dfb36b3a7035e8846ff`、research branch、index 空；既有 compatibility dirty cohort 與 untracked 保留。上一輪 source manifest 不改寫。
+- B VERIFIED：正式 bootstrap → controlledApplication/preload/renderer/project IPC 增加 bound result；固定 `tools/a1-admission.cjs` → `a1-supervisor.ps1` → existing Job Admit 的 A1 selector，reuse shared lifecycle transport。只接受固定 entry/mode，不提供任意 executable/argv/root。缺 permit 不進入 helper/native；缺 result 或 cleanup unknown 永不 PASS。
+- C VERIFIED：focused Node tests `a1-admission`、`a1-controlled-read`、`research-lifecycle-parent` 共 24 PASS；PS parse/C# compile/pure selector 5 checks PASS，沒有呼叫 Admit。materialized baseline+overlay 的 Node/web typecheck exit0；官方 Vite config memory-build 後 exclusive 寫入 121 outputs，232 source inputs；controlled static graph 檢查 PASS。Low fresh-context review 無剩餘 source blocker。未重跑歷史 native matrix。
+- D VERIFIED source candidate：`tasks/a1-admission-candidate.json`，SHA256 `3e96029dab7f5d97ccd1b4ba074dc5b27a03a8494ec0865810cb1ad15e41f932`。固定 baseline `e7a8ae4e2930ed4157163dfb36b3a7035e8846ff` 加 manifest 五個 product overlays；adapter/source blob/output/config/tool binary hashes 已綁定。Electron 43.6.0 exe SHA256 `9e1b3c401c1a1988942d5684fede8040d089b0c496ab86b899415ba9bfa0e49c`。新產物在 `.tmp/a1-native-001/artifact`，沒有使用歷史 out/package。
+- 下一次 Human run 契約：先 `node tools/a1-admission.cjs --verify` 比對本 candidate；Human 明確一次性授權後，才可在固定 run 下建立 `authorization.json`，exact keys `{version:1,runId:"a1-native-001",candidateSha256:<上述 digest>,expiresAt:<未來最多十分鐘的 epoch milliseconds>}`，再執行一次 `node tools/a1-admission.cjs --run`。目前 permit 不存在、歷史三 gates false；不得因本記錄自行執行。
+- 固定 synthetic roots：`<REPOSITORY>/.tmp/a1-native-001/project`（唯一 `readme.txt`，UTF-8 `A1 synthetic read` + LF）、`app-data`、`helper-data`；後兩者各有 home/userprofile/appdata/localappdata/temp/tmp 空目錄。固定正式 entry `artifact/main/index.js --munder-controlled-read`，固定 repo Electron。允許 app 自身 synthetic runtime data、result/request/receipt/attempt files 和 bounded Job cleanup；product write/delete/Git、agent/install/provider/service/network 仍拒絕。
+- 一次 workload：Read file → Deny → Reload and revoke access → Read file → Allow → 看到 synthetic content → Reload and revoke access → Read file → 再次 Allow → 看到 content → 正常關窗。app 60s、bootstrap 30s、Job workload 70s、cleanup 10s、outer 115s、retained-helper fallback 5s；最多一次 native-attempt，不重試。
+- 成功條件：上述正式 result sequence／candidate／nonce／request digest 匹配，正常 close、root exit0、Job active0、無 timeout/query/termination/persistence error，且 Human native dialog/display 目視證據另記。React acknowledgement 並非 optical proof；supervisor process completion 不等於 Task completion。
+- Stop/restore：identity drift、缺失/過期 permit、拒絕/錯序、app/helper timeout、result/receipt 缺失、Job cleanup unknown 均停止並保留 evidence；不自行第二次啟動、不以 PID discovery 清理。permit 原子消耗為 authorization.used.json；結束後確認 authorization.json 不存在，保留 used/request/native-attempt/result/receipt，歷史 gates false。若在消耗前拒絕，撤回該次 permit；cleanup unknown 必須另由 Human 決策，不推論 OS cleanup PASS。
+- 未驗：本 candidate Electron/native dialog/Job lifecycle/revoke 的真實 runtime；full-app、worker supervision、company readiness。環境投影不是 OS sandbox/credential isolation。source hashes 只證明 local freshness，不證明 hostile-host authenticity。可作 coherent local source checkpoint，本輪不強迫 commit，保留 index 空與既有 cohort，不 push。
+- High risk：只 source/build，reuse Job creation/cleanup；artifact 在 repo .tmp 新目錄，baseline committed source 加明列必要 overlay，不消費 compatibility dirty source。Rollback 取消 admission，保留材料；不 fallback／reset／clean／push。
+- 直接 blocker：正式 app 缺 task result producer；沒有它，exit0/Job-empty 無法證明 A1。窄接 consent/read/renderer acknowledgement/close。環境需固定 A1 map，不能使用 fixture map。
+
 # 2026-09-12 A1 local Git checkpoint
 
 本節只記錄上一輪 source integration 的 Git 封存；不實作 artifact binding／supervisor adapter，不啟動 Electron，不 push。

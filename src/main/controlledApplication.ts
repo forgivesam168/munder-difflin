@@ -7,9 +7,11 @@ import type { ControlledStartup } from './controlledStartup';
 import { createApplicationWindow } from './applicationWindow';
 import { registerProjectAccess } from './projectIpc';
 import { isTrustedRendererIpc } from './browserSecurity';
+import { controlledAcceptance } from './controlledAcceptance';
 
 /** Controlled mode of the product entry; no service/config/worker graph is loaded. */
 export async function startControlledApplication(mode: ControlledStartup): Promise<void> {
+  const acceptance = controlledAcceptance(mode);
   for (const key of ['appData', 'userData', 'sessionData', 'logs', 'crashDumps', 'temp'] as const) {
     const path = join(mode.appData, key);
     mkdirSync(path, { recursive: true });
@@ -21,14 +23,20 @@ export async function startControlledApplication(mode: ControlledStartup): Promi
   const documentPath = join(rendererRoot, 'index.html');
   const documentUrl = pathToFileURL(documentPath).href;
   const windows = new Set<BrowserWindow>();
-  const { projectRootGrants } = registerProjectAccess(windows, documentUrl, mode.projectRoot);
+  const { projectRootGrants } = registerProjectAccess(windows, documentUrl, mode.projectRoot, event => acceptance?.observe(event));
+  ipcMain.handle('app:controlledReadDisplayed', (event, content: unknown) => {
+    if (!isTrustedRendererIpc(event, documentUrl, [...windows].some(win => win.webContents === event.sender))) {
+      throw new Error('Untrusted controlled display sender');
+    }
+    acceptance?.display(content);
+  });
   ipcMain.handle('app:controlledRead', event => {
     if (!isTrustedRendererIpc(event, documentUrl, [...windows].some(win => win.webContents === event.sender))) {
       throw new Error('Untrusted controlled startup sender');
     }
     return { projectRoot: mode.projectRoot };
   });
-  const deadline = setTimeout(() => app.exit(1), 60_000);
+  const deadline = setTimeout(() => { try { acceptance?.finish(false); } finally { app.exit(1); } }, 60_000);
   app.on('will-quit', () => clearTimeout(deadline));
   app.on('window-all-closed', () => app.quit());
   await app.whenReady();
@@ -40,9 +48,13 @@ export async function startControlledApplication(mode: ControlledStartup): Promi
   windows.add(win);
   const wc = win.webContents;
   const revoke = (): void => { projectRootGrants.get(wc)?.revoke(); projectRootGrants.delete(wc); };
-  wc.on('did-start-navigation', details => { if (details.isMainFrame && !details.isSameDocument) revoke(); });
-  wc.on('render-process-gone', () => { revoke(); app.exit(1); });
+  let loaded = false;
+  wc.on('did-start-navigation', details => {
+    if (details.isMainFrame && !details.isSameDocument) { revoke(); if (loaded) acceptance?.observe('reload'); }
+  });
+  wc.on('render-process-gone', () => { revoke(); try { acceptance?.finish(false); } finally { app.exit(1); } });
   wc.on('destroyed', revoke);
+  win.on('close', () => { try { acceptance?.finish(true); } catch { app.exit(1); } });
   win.on('closed', () => { revoke(); windows.delete(win); });
   wc.setWindowOpenHandler(() => ({ action: 'deny' }));
   wc.on('will-navigate', event => event.preventDefault());
@@ -60,4 +72,5 @@ export async function startControlledApplication(mode: ControlledStartup): Promi
     callback({ cancel: !allowed });
   });
   await win.loadFile(documentPath);
+  loaded = true;
 }

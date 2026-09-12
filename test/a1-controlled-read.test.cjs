@@ -80,10 +80,10 @@ function runtime(mode, options = {}) {
         if (options.beforeRead) await options.beforeRead();
         return fsp.readFile(...args);
       } };
-      if (['node:fs', 'node:path', 'node:os', 'node:url'].includes(id)) return require(id);
+      if (['node:fs', 'node:path', 'node:os', 'node:url', 'node:crypto'].includes(id)) return require(id);
       if (!id.startsWith('.')) throw new Error(`Forbidden module import: ${id}`);
       const target = path.resolve(path.dirname(file), `${id}.ts`);
-      const allowed = ['bootstrap', 'controlledStartup', 'controlledApplication', 'applicationWindow', 'projectIpc', 'projectRoots', 'browserSecurity', 'fs', 'imageTypes'];
+      const allowed = ['bootstrap', 'controlledAcceptance', 'controlledStartup', 'controlledApplication', 'applicationWindow', 'projectIpc', 'projectRoots', 'browserSecurity', 'fs', 'imageTypes'];
       if (!allowed.includes(path.basename(target, '.ts'))) throw new Error(`Forbidden service import: ${id}`);
       return load(target);
     }
@@ -105,7 +105,7 @@ async function start(t, options) {
 }
 test('formal registration -> production preload -> consent -> readFileText -> result; effects refused', async t => {
   const { mode, r } = await start(t);
-  assert.deepEqual([...r.handlers.keys()].sort(), ['app:controlledRead', 'fs:readFile']);
+  assert.deepEqual([...r.handlers.keys()].sort(), ['app:controlledRead', 'app:controlledReadDisplayed', 'fs:readFile']);
   assert.equal(r.api.controlledRead, true);
   assert.equal((await r.api.controlledReadProject()).projectRoot, mode.projectRoot);
   const result = await r.api.readFile(mode.projectRoot, 'readme.txt');
@@ -219,7 +219,7 @@ for (const decision of [0, 1]) test(`actual controlled renderer action through p
   const { ControlledRead } = r.load(path.join(repo, 'src/renderer/src/ControlledRead.tsx'));
   const render = () => { cursor = 0; return ControlledRead(); };
   render(); mounted = true;
-  for (const effect of effects) t.after(effect());
+  for (const effect of effects) { const cleanup = effect(); if (cleanup) t.after(cleanup); }
   await new Promise(resolve => setImmediate(resolve));
   function elements(node) {
     if (!node || typeof node !== 'object') return [];

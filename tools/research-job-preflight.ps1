@@ -214,7 +214,19 @@ public static class ResearchEmptyJob {
         public int Code;
         public TerminationProbeFailure(int code) { Code = code; }
     }
-    public static AdmissionResult Admit(string executable, bool descendant, string fixture, bool forceDeadline, bool closeJob, bool receiptFault, bool crashHelper, System.Collections.IDictionary childEnvironment, bool rootFailure = false, bool rootTimeout = false, bool queryFault = false, bool runningQueryFault = false, bool terminationFault = false, bool workloadTimeout = false, bool explicitEnvironment = false, bool lifecycleSuspended = false, bool lifecycleRunning = false, bool lifecycleStopProbe = false) {
+    // Pure fixed selector: no executable/argv/budget extension point for A1.
+    public static string A1Command(string executable, string entry, string run) {
+        if (!System.IO.Path.IsPathFullyQualified(run) || System.IO.Path.GetFullPath(run) != run ||
+            System.IO.Path.GetFileName(run) != "a1-native-001" ||
+            System.IO.Path.GetFileName(System.IO.Path.GetDirectoryName(run)) != ".tmp")
+            throw new ArgumentException("Fixed A1 run required");
+        string repository = System.IO.Path.GetDirectoryName(System.IO.Path.GetDirectoryName(run));
+        if (executable != System.IO.Path.Combine(repository, "node_modules", "electron", "dist", "electron.exe") ||
+            entry != System.IO.Path.Combine(run, "artifact", "main", "index.js"))
+            throw new ArgumentException("Fixed A1 executable and entry required");
+        return QuoteArgument(executable) + " " + QuoteArgument(entry) + " " + QuoteArgument("--munder-controlled-read");
+    }
+    public static AdmissionResult Admit(string executable, bool descendant, string fixture, bool forceDeadline, bool closeJob, bool receiptFault, bool crashHelper, System.Collections.IDictionary childEnvironment, bool rootFailure = false, bool rootTimeout = false, bool queryFault = false, bool runningQueryFault = false, bool terminationFault = false, bool workloadTimeout = false, bool explicitEnvironment = false, bool lifecycleSuspended = false, bool lifecycleRunning = false, bool lifecycleStopProbe = false, bool controlledA1 = false) {
         if (!System.IO.Path.IsPathFullyQualified(executable) || executable.Contains("\""))
             throw new ArgumentException("Absolute executable required");
         if (lifecycleSuspended && (!closeJob || descendant || forceDeadline || receiptFault || crashHelper || rootFailure || rootTimeout || queryFault || runningQueryFault || terminationFault || workloadTimeout || explicitEnvironment || !System.IO.Path.IsPathFullyQualified(fixture)))
@@ -222,6 +234,10 @@ public static class ResearchEmptyJob {
         if (lifecycleRunning && (lifecycleSuspended || closeJob || descendant || forceDeadline || receiptFault || crashHelper || rootFailure || rootTimeout || queryFault || runningQueryFault || terminationFault || workloadTimeout || explicitEnvironment || !System.IO.Path.IsPathFullyQualified(fixture)))
             throw new ArgumentException("Invalid running lifecycle mode");
         if (lifecycleStopProbe && !lifecycleRunning) throw new ArgumentException("Stop probe requires running lifecycle");
+        if (controlledA1) {
+            if (!lifecycleRunning || lifecycleStopProbe) throw new ArgumentException("A1 requires plain running lifecycle");
+            A1Command(executable, fixture, Environment.CurrentDirectory);
+        }
         IntPtr job = CreateJobObjectW(IntPtr.Zero, null);
         if (job == IntPtr.Zero) throw new Win32Exception(Marshal.GetLastWin32Error());
         IntPtr attributes = IntPtr.Zero, jobValue = IntPtr.Zero, environment = IntPtr.Zero;
@@ -259,11 +275,12 @@ public static class ResearchEmptyJob {
                 QuoteArgument(explicitEnvironment ? "require('fs').writeFileSync('child-environment.json',JSON.stringify(Object.fromEntries(Object.entries(process.env).map(([k,v])=>[k.toUpperCase(),require('crypto').createHash('sha256').update(v).digest('hex')]))),{flag:'wx'})" : runningQueryFault ? "require('fs').writeFileSync('query-root-ready','ready',{flag:'wx'});setTimeout(()=>process.exit(0),5000)" : rootTimeout ? "setTimeout(()=>process.exit(0),3000)" : "process.exit(process.env.RESEARCH_ENV_SENTINEL===undefined?0:91)")));
             if (lifecycleSuspended || lifecycleRunning)
                 command = new System.Text.StringBuilder(QuoteArgument(executable) + " " + QuoteArgument(fixture) + " " + QuoteArgument("--fixture") + " " + QuoteArgument(Environment.CurrentDirectory));
+            if (controlledA1) command = new System.Text.StringBuilder(A1Command(executable, fixture, Environment.CurrentDirectory));
             string queryReady = System.IO.Path.Combine(Environment.CurrentDirectory, "query-root-ready");
             if (runningQueryFault && (System.IO.File.Exists(queryReady) || System.IO.Directory.Exists(queryReady)))
                 throw new InvalidOperationException("Query readiness path already exists");
             var workloadClock = System.Diagnostics.Stopwatch.StartNew();
-            uint workloadBudget = lifecycleRunning ? 40000u : rootTimeout ? 200u : workloadTimeout ? 1500u : descendant ? 8000u : 5000u;
+            uint workloadBudget = controlledA1 ? 70000u : lifecycleRunning ? 40000u : rootTimeout ? 200u : workloadTimeout ? 1500u : descendant ? 8000u : 5000u;
             Check(CreateProcessW(executable, command, IntPtr.Zero, IntPtr.Zero, false,
                 0x08080400u | ((closeJob || receiptFault || (queryFault && !runningQueryFault) || (crashHelper && !descendant)) ? 4u : 0u), environment, Environment.CurrentDirectory, ref startup, out child));
             // CREATE_NO_WINDOW | EXTENDED_STARTUPINFO_PRESENT | CREATE_UNICODE_ENVIRONMENT

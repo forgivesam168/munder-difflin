@@ -8,7 +8,7 @@ const identity = require('./research-source-identity.cjs');
 // projectRoots imports only Node builtins; TypeScript's used API is in its bundled JS.
 const files = Object.freeze([
   'tools/research-lifecycle-binding.cjs', 'tools/research-lifecycle-result.cjs',
-  'tools/research-lifecycle-parent.cjs', 'tools/research-lifecycle-supervisor.ps1',
+  'tools/windows-lifecycle-transport.cjs', 'tools/research-lifecycle-parent.cjs', 'tools/research-lifecycle-supervisor.ps1',
   'tools/research-job-preflight.ps1', 'tools/research-job-run.ps1',
   'tools/research-lifecycle-environment.cjs', 'tools/research-job-environment.cjs',
   'tools/research-env.cjs', 'tools/research-source-identity.cjs',
