@@ -10,7 +10,7 @@ $match=[regex]::Match($source,"(?s)Add-Type -TypeDefinition @'\r?\n(.*?)\r?\n'@"
 if(-not $match.Success){throw 'Missing class'}
 # Compilation and PURE selectors only. Never call Admit or any Win32 method.
 Add-Type -TypeDefinition $match.Groups[1].Value
-$run=Join-Path $root '.tmp/a1-native-002'
+$run=Join-Path $root '.tmp/a1-native-003'
 $exe=Join-Path $root 'node_modules/electron/dist/electron.exe'
 $entry=Join-Path $run 'artifact/main/index.js'
 $command=[ResearchEmptyJob]::A1Command($exe,$entry,$run)
