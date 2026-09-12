@@ -41,6 +41,16 @@ function runtime(mode, options = {}) {
       this.webContents = new EventEmitter();
       const wc = this.webContents;
       wc.mainFrame = { url: '' }; wc.isDestroyed = () => false;
+      wc.reloadCalls = 0;
+      // Model the main-owned API contract, not a native Electron execution.
+      wc.reload = () => {
+        wc.reloadCalls++;
+        wc.emit('did-start-navigation', { isMainFrame: true, isSameDocument: false });
+      };
+      wc.finishReload = () => {
+        wc.mainFrame = { url: wc.mainFrame.url };
+        wc.emit('did-finish-load');
+      };
       wc.setWindowOpenHandler = fn => { wc.open = fn; };
       wc.session = new EventEmitter();
       wc.session.setPermissionRequestHandler = fn => { wc.session.requestPermission = fn; };
@@ -117,7 +127,7 @@ async function start(t, options) {
 }
 test('formal registration -> production preload -> consent -> readFileText -> result; effects refused', async t => {
   const { mode, r } = await start(t);
-  assert.deepEqual([...r.handlers.keys()].sort(), ['app:controlledRead', 'app:controlledReadDisplayed', 'app:controlledReadReady', 'fs:readFile']);
+  assert.deepEqual([...r.handlers.keys()].sort(), ['app:controlledRead', 'app:controlledReadDisplayed', 'app:controlledReadReady', 'app:controlledReload', 'fs:readFile']);
   assert.equal(r.api.controlledRead, true);
   assert.equal((await r.api.controlledReadProject()).projectRoot, mode.projectRoot);
   const result = await r.api.readFile(mode.projectRoot, 'readme.txt');
@@ -273,10 +283,43 @@ test('bound product Ready uses trusted preload IPC and wrong sequence persists d
   assert.equal([...timers.values()][0].at,binding.contract.phaseMs.startup);
   now=1000;await r.api.controlledReadReady();
   const due=[...timers.values()][0].at;assert.equal(due,1000+binding.contract.phaseMs.human);
-  now=2000;wc.emit('did-start-navigation',{isMainFrame:true,isSameDocument:false});
+  now=2000;await r.api.controlledReload();
   // A reload before the required deny is a sequence failure, not renewed timing.
   const result=JSON.parse(fs.readFileSync(path.join(mode.appData,'a1-result.json')));
   assert.equal(result.reason,'SEQUENCE_MISMATCH');assert.equal(result.phase,'human');assert.deepEqual(result.events,['reload']);assert.deepEqual(r.exits,[1]);
+});
+
+test('trusted main-owned reload revokes grants, counts once and requires fresh consent', async t => {
+  let decision=0;
+  const {mode,r}=await start(t,{bound:true,consent:()=>decision});
+  const wc=r.windows[0].webContents, handler=r.handlers.get('app:controlledReload');
+  const frame=wc.mainFrame;
+  assert.throws(()=>handler({sender:wc,senderFrame:{url:frame.url}}),/Untrusted/);
+  assert.throws(()=>handler({sender:{isDestroyed:()=>false},senderFrame:frame}),/Untrusted/);
+  const url=frame.url;frame.url='https://untrusted.invalid';
+  assert.throws(()=>handler({sender:wc,senderFrame:frame}),/Untrusted/);frame.url=url;
+  assert.equal(wc.reloadCalls,0);
+  await r.api.controlledReadReady();
+  assert.equal((await r.api.readFile(mode.projectRoot,'readme.txt')).ok,false);
+  for(let pass=0;pass<2;pass++) {
+    const previous=wc.mainFrame;
+    await r.api.controlledReload();await r.api.controlledReload();
+    assert.equal(wc.reloadCalls,pass+1);
+    // Navigation events can repeat but never produce acceptance reload events.
+    wc.emit('did-start-navigation',{isMainFrame:true,isSameDocument:false});
+    wc.finishReload();assert.notEqual(wc.mainFrame,previous);
+    assert.throws(()=>handler({sender:wc,senderFrame:previous}),/Untrusted/);
+    await r.api.controlledReadReady();decision=1;
+    const content=await r.api.readFile(mode.projectRoot,'readme.txt');
+    assert.equal(content.ok,true);assert.equal(r.consentCalls,pass+2);
+    await r.api.controlledReadDisplayed(content.content);
+  }
+  let prevented=false;wc.emit('will-navigate',{preventDefault(){prevented=true;}});
+  assert.equal(prevented,true);
+  r.windows[0].emit('close');
+  const result=JSON.parse(fs.readFileSync(path.join(mode.appData,'a1-result.json')));
+  assert.equal(result.reason,'PASS');
+  assert.deepEqual(result.events,['deny','reload','allow','read','display','reload','allow','read','display']);
 });
 
 test('bound product renderer-gone and startup timeout write different terminal reasons', async t => {
@@ -302,7 +345,7 @@ test('renderer loss after completed close still forces failed root without rewri
   await r.api.controlledReadReady();
   assert.equal((await r.api.readFile(mode.projectRoot,'readme.txt')).ok,false);
   for(let pass=0;pass<2;pass++) {
-    wc.emit('did-start-navigation',{isMainFrame:true,isSameDocument:false});
+    await r.api.controlledReload();wc.finishReload();
     await r.api.controlledReadReady();decision=1;
     const result=await r.api.readFile(mode.projectRoot,'readme.txt');assert.equal(result.ok,true);
     await r.api.controlledReadDisplayed(result.content);

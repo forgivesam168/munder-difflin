@@ -58,9 +58,21 @@ export async function startControlledApplication(mode: ControlledStartup): Promi
   windows.add(win);
   const wc = win.webContents;
   const revoke = (): void => { projectRootGrants.get(wc)?.revoke(); projectRootGrants.delete(wc); };
-  let loaded = false;
+  let reloadPending = false;
+  ipcMain.handle('app:controlledReload', event => {
+    if (!isTrustedRendererIpc(event, documentUrl, windows.has(win) && event.sender === wc)) {
+      throw new Error('Untrusted controlled reload sender');
+    }
+    if (reloadPending) return;
+    reloadPending = true;
+    revoke();
+    // This explicit action is the sole acceptance reload event producer.
+    acceptance?.observe('reload');
+    if (!failureExitRequested) wc.reload();
+  });
+  wc.on('did-finish-load', () => { reloadPending = false; });
   wc.on('did-start-navigation', details => {
-    if (details.isMainFrame && !details.isSameDocument) { revoke(); if (loaded) acceptance?.observe('reload'); }
+    if (details.isMainFrame && !details.isSameDocument) revoke();
   });
   wc.on('render-process-gone', () => { revoke(); try { acceptance?.rendererGone(); } finally { fail(); } });
   wc.on('destroyed', revoke);
@@ -82,5 +94,4 @@ export async function startControlledApplication(mode: ControlledStartup): Promi
     callback({ cancel: !allowed });
   });
   await win.loadFile(documentPath);
-  loaded = true;
 }

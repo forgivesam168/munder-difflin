@@ -228,7 +228,7 @@ public static class ResearchEmptyJob {
     // Pure fixed executable/argv/root selector for the current A1 candidate.
     public static string A1Command(string executable, string entry, string run) {
         if (!System.IO.Path.IsPathFullyQualified(run) || System.IO.Path.GetFullPath(run) != run ||
-            System.IO.Path.GetFileName(run) != "a1-native-004" ||
+            System.IO.Path.GetFileName(run) != "a1-native-005" ||
             System.IO.Path.GetFileName(System.IO.Path.GetDirectoryName(run)) != ".tmp")
             throw new ArgumentException("Fixed A1 run required");
         string repository = System.IO.Path.GetDirectoryName(System.IO.Path.GetDirectoryName(run));

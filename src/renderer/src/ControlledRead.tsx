@@ -43,7 +43,7 @@ export function ControlledRead(): JSX.Element {
     // React state updates may be batched; latch before navigation or another click.
     reloadStarted.current = true;
     setReloading(true);
-    window.location.reload();
+    void window.cth.controlledReload().catch(() => setStatus('Reload request failed'));
   };
   return <main style={{ padding: 24, background: 'var(--cth-cream-100)', height: '100%', overflow: 'auto' }}>
     <h1>Munder Difflin — Controlled project read</h1>
