@@ -7,6 +7,8 @@ export function ControlledRead(): JSX.Element {
   const [status, setStatus] = useState('Loading project…');
   const [busy, setBusy] = useState(false);
   const [ready, setReady] = useState(false);
+  const [reloading, setReloading] = useState(false);
+  const reloadStarted = useRef(false);
   useEffect(() => {
     if (content) void window.cth.controlledReadDisplayed(content).catch(() => setStatus('Result acknowledgement failed'));
   }, [content]);
@@ -36,12 +38,19 @@ export function ControlledRead(): JSX.Element {
     if (result.ok) { setContent(result.content); setStatus('Read complete'); }
     else setStatus(result.error);
   };
+  const reload = (): void => {
+    if (!ready || busy || reloadStarted.current) return;
+    // React state updates may be batched; latch before navigation or another click.
+    reloadStarted.current = true;
+    setReloading(true);
+    window.location.reload();
+  };
   return <main style={{ padding: 24, background: 'var(--cth-cream-100)', height: '100%', overflow: 'auto' }}>
     <h1>Munder Difflin — Controlled project read</h1>
     <p>Read-only project: {root || 'unavailable'}</p>
     <label>File within project <input value={path} onChange={event => setPath(event.target.value)} /></label>
     <button disabled={!ready || busy} onClick={() => void read()}>Read file</button>
-    <button onClick={() => window.location.reload()}>Reload and revoke access</button>
+    <button disabled={!ready || busy || reloading} onClick={reload}>Reload and revoke access</button>
     <p role="status" aria-live="polite">{status}</p>
     <pre style={{ whiteSpace: 'pre-wrap' }}>{content}</pre>
   </main>;

@@ -1,3 +1,31 @@
+# 2026-09-12 A1 native-004 immutable local checkpoint
+
+- A/C VERIFIED：baseline HEAD eab8602d、research branch、index空；exact10-path scope/raw hashes/Git blobs、004 candidate digest `43f8037e41e6bb8be906bc4298f29cd3d7e195d484ce176dac41fa5e1f782d50`、artifact/environment admission verify PASS。001/002/003 inventories及historical manifests、compatibility/untracked、main/Starter/三false gates全部保留；004無permit/request/attempt。
+- B/D：只依Human授權exact10-path local commit，manifest scope為唯一allowlist；payload不變，metadata以containing commit表示source checkpoint，不嵌入future SHA。沿用39 tests、兩項old-FAIL/new-PASS regression、9 selectors、四typechecks、121 outputs/233 inputs及source review；本輪不重跑native matrix。staged/committed tree逐項驗證source identity，commit實際SHA由交付報告與local receipt記錄。
+- Guard review：!ready/busy/reloading禁用Reload；同步ref latch先於navigation，阻止同document重複callback；新document等trusted Ready。沒有新增acceptance event、sequence/budgets/Result v2/Ready IPC/security改寫。Ready-after-reload根因仍UNKNOWN。
+- 本節取代下方歷史uncommitted狀態；不改寫003 FAIL。只local checkpoint，origin research最後只讀查詢；push需另授權。無workflow/credential/company data/raw runtime evidence納入；不permit、不Electron。
+
+# 2026-09-12 A1 native-004 Reload guard candidate
+
+- A complete：003 Human確認Deny後第一次Reload未看到Ready，因此再次按Reload，與automated deny/reload/reload、human/SEQUENCE_MISMATCH一致。003為Human sequence deviation；source VERIFIED repeated Reload was enabled while !ready。consent/read defect NOT ESTABLISHED；Ready-after-reload root cause仍UNKNOWN。只增補本節，不覆寫001/002/003原件。
+- Goal/B：僅controlled renderer local reloading state加同步ref latch，Reload只在ready且非busy/reloading可操作；setState可能batch，ref在navigation前阻止同一document重複callback。新document預設ready=false，仍等正式trusted Ready ack；不sleep、不自動reload、不重設deadline、不新增acceptance event。004 fixed identity及直接builder/adapter/selector bindings最小替換，不重構runId架構。
+- C VERIFIED：39 focused renderer/A1/parent tests PASS/0 FAIL/0 SKIP；新增2 guard tests在舊eab8602d UI失敗、修正後PASS。hook driver刻意batch state，驗證同一closure連點只reload一次，並涵蓋!ready/busy/reloading與新document重新等ack；不等於React DOM/native scheduling proof。初次cross-VM continuation未排空造成1 test failure，改用setImmediate排空async後通過；初始結果保留 `.tmp/a1-004-evidence/tests-initial-failure.txt`。
+- C VERIFIED：9 pure selector checks/nativeCreation=false；worktree與materialized004 source Node/web四項typecheck exit0；exclusive build121 outputs/233 inputs；admission --verify exit0/CLOSED/nativeExecuted=false；exact source diff review及diff --check PASS。budgets和receipt/expected sequence逐項deepEqual003，Result v2/schema與main/preload/Ready/security source未改；未重跑native matrix。
+- D complete：candidate `43f8037e41e6bb8be906bc4298f29cd3d7e195d484ce176dac41fa5e1f782d50`，manifest `tasks/a1-admission-candidate-004.json`，run `<REPOSITORY>/.tmp/a1-native-004`，artifact/main/index.js與project/app-data/helper-data全部新binding。request/permit/nonce尚未建立，留待future authorization。source baseline eab8602d加本輪overlay，尚未形成immutable Git checkpoint，不得把baseline稱004source commit。
+- Preservation VERIFIED：001/002各152檔、003共150檔以及三份historical manifests與本輪baseline inventories逐byte hash相同；compatibility五檔/untracked完整保留，index空、HEAD/main/Starter未變、三gates false。003 Human補充只記此節與004metadata，不修改原件。
+- Coherent local commit candidate：exact10-path scope與source/test raw/Git blob identities見004manifest.localCheckpoint。只Reload guard/new test及必要identity companions、manifest/todo。未stage/commit/push/permit/Electron；decision-ready for source checkpoint與Human審查，native仍需immutable checkpoint及獨立授權。High-risk runtime未授權；rollback需另授權scoped source revert，不刪歷史材料或reset/clean。
+- 下一004 native驗收（需獨立授權）：區分a) Ready正常回來，Human可繼續；b) Ready不回來，既有bounded Human phase/terminal diagnostics保留真正Ready/reload failure evidence。guard不是Ready根因修復或native PASS；budgets/schema/sequence/security/ordinary mode不改。
+
+# 2026-09-12 A1 native-003 — FAIL / human SEQUENCE_MISMATCH
+
+- A VERIFIED：先admission verify exit0/CLOSED，HEAD `eab8602d2b0c369f3ee89bfbc18415c25be8c131`，candidate `2d815ffff0e4c45039450662b0150d7057d4df5a0ffa3b35cdfed78001084a20`、source/artifact/Electron/environment identities匹配；001/002各152檔及manifest未變、compatibility未漂移、index空、三gates false、003無prior permit/request/attempt。
+- B EXECUTED：本輪独立一次性Human授權；exact四-key permit，expiresAt建立時+600000ms；只執行一次admission --run，native attempts1/retries0。使用committed phase/supervisor budgets，沒有縮短Human phase。未修改source、未fallback或retry。
+- C VERIFIED：Result v2 binding PASS；FAIL / phase human / reason SEQUENCE_MISMATCH；exact events `[deny,reload,reload]`，第三事件預期allow。不是timeout。003第二個reload來源UNKNOWN；不能套用002的Human deviation歸因，也不能直接稱consent/read product defect。
+- Human visual UNKNOWN：closeout尚未收到003-specific操作/畫面觀察，已另詢問；無automated optical proof。正式bound product event支持trusted Ready及native consent deny路徑；沒有allow/read/display事件，完整renderer/preload/IPC/readFileText/result delivery及deny無內容的Human visual確認尚缺。
+- C VERIFIED：root exit1、helper exit0、Job Member=true、ActiveProcesses=0、cleanup VERIFIED_EMPTY；TimedOut/RootTimedOut=false，無query/termination/persistence error。permit已消耗為authorization.used.json，active authorization不存在；post-run binding.verify({fresh:false})及result/receipt hashes匹配，三gates仍false。HEAD/main/Starter未變，index空，001/002與compatibility保留。
+- D evidence：全部原件保留 `.tmp/a1-native-003/`，identity索引 `native-outcome.json`；request SHA256 `c1e90bae111b8aa2bb95a277a14d30ff685a80b06ba9e28a64de916052b106bf`，result `5d98ed8792ac003589d5d88f332f2438ebff0ce7fe618d456dc94ba93d52cd8c`，supervisor receipt `b721be533c0528c40df793970324c018e1a6d93be8e00627f0ad911dec983356`。nonce由本次admission新產生，未重用舊request/permit。
+- 下一obligation：先對照003 Human操作與reload event來源；完整deny/allow/read/display/re-consent/normal-close acceptance仍未完成。003已消耗不可重用；任何後續runtime需獨立candidate/run與授權。形成failure evidence/document checkpoint候選，未stage/commit/push、未開始B；不支持A/full-app/worker/company/OS isolation readiness。001/002歷史結果保持不變。
+
 # 2026-09-12 A1 native-003 candidate / local checkpoint
 
 - Goal：只為新獨立 acceptance attempt 綁定003 identity；不啟動 Electron、不 permit、不 push。A complete：HEAD9b65、index空、001/002各152檔 inventories及兩個歷史 manifests保存於 `.tmp/a1-003-evidence/baseline.json`；003 root/manifest原不存在。B complete：只改run contract、fixed builder/admission/supervisor/selector identities；build archive baseline提升至目前product checkpoint9b65，保留既有overlay機制，不做architecture refactor。
