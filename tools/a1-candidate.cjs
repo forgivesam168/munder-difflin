@@ -5,12 +5,12 @@ const crypto = require('node:crypto');
 const assert = require('node:assert/strict');
 const cp = require('node:child_process');
 const root = path.resolve(__dirname, '..');
-const baseline = '5dd1288bf8de264e46caba5afc700d80fc9be417';
+const baseline = '560d8366e6a7b2e6b4302d1fe4e7d9005be28de7';
 const contract = require('../src/shared/a1-contract.json');
 const runId = contract.runId;
 const run = path.join(root, '.tmp', runId);
-const manifestFile = path.join(root, 'tasks/a1-admission-candidate-005.json');
-const overlay = ['src/main/controlledAcceptance.ts', 'src/main/controlledApplication.ts', 'src/shared/a1-contract.json', 'src/preload/index.ts', 'src/renderer/src/ControlledRead.tsx'];
+const manifestFile = path.join(root, 'tasks/a1-admission-candidate-006.json');
+const overlay = ['src/main/a1EventTrace.ts', 'src/main/controlledAcceptance.ts', 'src/main/controlledApplication.ts', 'src/main/projectIpc.ts', 'src/shared/a1-contract.json'];
 const adapterFiles = ['tools/a1-candidate.cjs', 'tools/a1-build.cjs', 'tools/a1-admission.cjs', 'tools/a1-supervisor.ps1', 'tools/windows-lifecycle-transport.cjs', 'tools/research-job-preflight.ps1', 'tools/research-write-receipt.cjs'];
 const hash = bytes => crypto.createHash('sha256').update(bytes).digest('hex');
 const digest = value => hash(JSON.stringify(value));
@@ -74,7 +74,7 @@ function verify({ fresh = true } = {}) {
   assert.equal(digest(manifest.candidate), manifest.candidateSha256);
   const c = manifest.candidate;
   assert.equal(hash(fs.readFileSync(safe(path.join(run,'candidate.json')))),manifest.candidateSha256,'Candidate payload drift');
-  assert.equal(c.runId, runId); assert.deepEqual(c.invocation, { executable: 'node_modules/electron/dist/electron.exe', entry: '.tmp/a1-native-005/artifact/main/index.js', args: ['--munder-controlled-read'] });
+  assert.equal(c.runId, runId); assert.deepEqual(c.invocation, { executable: 'node_modules/electron/dist/electron.exe', entry: '.tmp/a1-native-006/artifact/main/index.js', args: ['--munder-controlled-read'] });
   validateTimeouts(c);
   assert.deepEqual(Object.keys(c.adapterSha256).sort(), [...adapterFiles].sort());
   for (const [p,h] of Object.entries(c.adapterSha256)) assert.equal(hash(fs.readFileSync(safe(path.join(root,p)))),h,'Adapter drift');
@@ -126,4 +126,71 @@ function validateResult(result, req, { allowFailure = false } = {}) {
   }
   return result;
 }
-module.exports={root,baseline,runId,run,manifestFile,overlay,adapterFiles,hash,digest,git,safe,inventory,environment,validateEnvironment,paths,verify,request,validateResult,contract,timeouts,validateTimeouts};
+const traceKinds = new Set(['application-start','document-load-request','navigation-start','reload-handler-entry',
+  'acceptance-event','reload-invocation','navigation-finished','ready','window-close','result-publication','renderer-gone']);
+const traceKeys = new Set(['schemaVersion','sequence','monotonicMs','elapsedMs','runId','candidateSha256','requestSha256',
+  'kind','documentGeneration','sourceDocumentGeneration','targetDocumentGeneration','reloadActionId',
+  'frameIdentity','documentIdentity','trusted','acceptanceEvent']);
+function validateTrace(file, req, result, { allowMissing = false } = {}) {
+  if (!fs.existsSync(file)) {
+    if (allowMissing) return { status: 'MISSING', records: 0, acceptanceEvents: [] };
+    throw new Error('A1 event trace missing');
+  }
+  const lines = fs.readFileSync(file, 'utf8').split(/\r?\n/).filter(Boolean);
+  assert.ok(lines.length > 0, 'A1 event trace is empty');
+  const records = lines.map((line, index) => {
+    const value = JSON.parse(line);
+    assert.ok(value && typeof value === 'object' && !Array.isArray(value), `Invalid A1 trace record ${index + 1}`);
+    for (const key of Object.keys(value)) assert.ok(traceKeys.has(key), `Unexpected A1 trace field ${key}`);
+    for (const key of ['schemaVersion','sequence','monotonicMs','elapsedMs','runId','candidateSha256','requestSha256',
+      'kind','documentGeneration','frameIdentity','documentIdentity','trusted']) assert.ok(key in value, `Missing A1 trace field ${key}`);
+    assert.equal(value.schemaVersion, 1); assert.equal(value.sequence, index + 1);
+    assert.equal(value.runId, req.runId); assert.equal(value.candidateSha256, req.candidateSha256);
+    assert.equal(value.requestSha256, hash(JSON.stringify(req)));
+    assert.ok(Number.isFinite(value.monotonicMs) && value.monotonicMs >= 0);
+    assert.ok(Number.isFinite(value.elapsedMs) && value.elapsedMs >= 0);
+    assert.ok(traceKinds.has(value.kind));
+    assert.ok(Number.isSafeInteger(value.documentGeneration) && value.documentGeneration >= 0);
+    assert.equal(value.frameIdentity, 'owned-main-frame');
+    assert.equal(value.documentIdentity, 'controlled-read');
+    assert.equal(value.trusted, true);
+    if (value.reloadActionId !== undefined) assert.match(value.reloadActionId, /^reload-[1-9]\d*$/);
+    if (value.acceptanceEvent !== undefined) assert.ok(typeof value.acceptanceEvent === 'string');
+    return value;
+  });
+  for (let i = 1; i < records.length; i++) {
+    assert.ok(records[i].monotonicMs >= records[i - 1].monotonicMs, 'A1 trace monotonic clock drift');
+    assert.ok(records[i].elapsedMs >= records[i - 1].elapsedMs, 'A1 trace elapsed time drift');
+  }
+  const acceptance = records.filter(record => record.kind === 'acceptance-event');
+  assert.ok(acceptance.every(record => typeof record.acceptanceEvent === 'string'));
+  assert.deepEqual(acceptance.map(record => record.acceptanceEvent), result.events);
+  if (result.result === 'PASS') {
+    const sequence = ['deny','reload','allow','read','display','reload','allow','read','display'];
+    assert.equal(records[0].kind, 'application-start');
+    assert.ok(records.some(record => record.kind === 'document-load-request' && record.documentGeneration === 1));
+    assert.ok(records.some(record => record.kind === 'navigation-finished' && record.documentGeneration === 1 && record.reloadActionId === undefined));
+    const readyGenerations = new Set(records.filter(record => record.kind === 'ready').map(record => record.documentGeneration));
+    for (const generation of [1, 2, 3]) assert.ok(readyGenerations.has(generation), `A1 Ready missing for generation ${generation}`);
+    assert.deepEqual(acceptance.map(record => [record.acceptanceEvent, record.documentGeneration]),
+      [['deny',1],['reload',1],['allow',2],['read',2],['display',2],['reload',2],['allow',3],['read',3],['display',3]]);
+    assert.deepEqual(acceptance.map(record => record.acceptanceEvent), sequence);
+    const handlers = records.filter(record => record.kind === 'reload-handler-entry');
+    const invocations = records.filter(record => record.kind === 'reload-invocation');
+    const starts = records.filter(record => record.kind === 'navigation-start');
+    const finishes = records.filter(record => record.kind === 'navigation-finished' && record.reloadActionId);
+    assert.equal(new Set(handlers.map(record => record.reloadActionId)).size, 2);
+    assert.equal(handlers.length, 2); assert.equal(invocations.length, 2); assert.equal(starts.length, 2); assert.equal(finishes.length, 2);
+    for (const handler of handlers) {
+      const action = handler.reloadActionId;
+      const related = records.filter(record => record.reloadActionId === action);
+      assert.deepEqual(related.map(record => record.kind), ['reload-handler-entry','acceptance-event','reload-invocation','navigation-start','navigation-finished']);
+    }
+    const close = records.find(record => record.kind === 'window-close');
+    const publication = records.find(record => record.kind === 'result-publication');
+    assert.ok(close && publication && close.documentGeneration === 3 && publication.documentGeneration === 3
+      && close.sequence < publication.sequence);
+  }
+  return { status: 'VERIFIED', records: records.length, acceptanceEvents: acceptance.map(record => record.acceptanceEvent) };
+}
+module.exports={root,baseline,runId,run,manifestFile,overlay,adapterFiles,hash,digest,git,safe,inventory,environment,validateEnvironment,paths,verify,request,validateResult,validateTrace,contract,timeouts,validateTimeouts};

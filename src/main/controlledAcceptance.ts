@@ -4,6 +4,7 @@ import { dirname, join } from 'node:path';
 import contract from '../shared/a1-contract.json';
 import type { ControlledStartup } from './controlledStartup';
 import { assertControlledPath } from './controlledStartup';
+import { A1EventTrace, type A1TraceContext, type A1TraceSink } from './a1EventTrace';
 
 export const A1_SEQUENCE = ['deny', 'reload', 'allow', 'read', 'display', 'reload', 'allow', 'read', 'display'] as const;
 export const A1_CONTENT = 'A1 synthetic read\n';
@@ -30,7 +31,8 @@ export class ControlledAcceptance {
   private deadline: number;
   private timer: ReturnType<typeof setTimeout>;
   constructor(private readonly publish: (result: A1Terminal) => void,
-    private readonly fail: () => void = () => undefined, private readonly time: Clock = clock) {
+    private readonly fail: () => void = () => undefined, private readonly time: Clock = clock,
+    readonly trace?: A1TraceSink) {
     this.deadline = time.now() + contract.phaseMs.startup;
     this.timer = time.setTimeout(() => this.tick(), contract.phaseMs.startup);
   }
@@ -56,20 +58,23 @@ export class ControlledAcceptance {
     try { this.publish({ result: reason === 'PASS' ? 'PASS' : 'FAIL', phase: this.phase, reason, events: [...this.events] }); }
     finally { if (reason !== 'PASS') this.fail(); }
   }
-  ready(): void {
-    if (!this.expire() && this.phase === 'startup') this.enter('human');
-  }
-  observe(event: string): void {
+  ready(context?: A1TraceContext): void {
     if (this.expire()) return;
+    this.trace?.record('ready', context);
+    if (this.phase === 'startup') this.enter('human');
+  }
+  observe(event: string, context?: A1TraceContext): void {
+    if (this.expire()) return;
+    this.trace?.record('acceptance-event', { ...context, acceptanceEvent: event });
     const expected = A1_SEQUENCE[this.events.length];
     this.events.push(event);
     if (this.phase !== 'human' || event !== expected) { this.end('SEQUENCE_MISMATCH'); return; }
     if (this.events.length === A1_SEQUENCE.length) this.enter('close');
   }
-  display(content: unknown): void {
+  display(content: unknown, context?: A1TraceContext): void {
     if (this.expire()) return;
     if (content !== A1_CONTENT) { this.end('SEQUENCE_MISMATCH'); return; }
-    this.observe('display');
+    this.observe('display', context);
   }
   rendererGone(): void { if (!this.expire()) this.end('RENDERER_GONE'); }
   finish(): void {
@@ -104,11 +109,14 @@ export function controlledAcceptance(mode: ControlledStartup, fail: () => void =
     || JSON.stringify(candidate.contract) !== JSON.stringify(contract)) throw new Error('Invalid A1 candidate contract binding');
   const resultFile = join(mode.appData, 'a1-result.json');
   if (existsSync(resultFile)) throw new Error('A1 result already exists');
+  const requestSha256 = createHash('sha256').update(bytes).digest('hex');
+  const trace = new A1EventTrace(run, request.runId, request.candidateSha256, requestSha256);
   return new ControlledAcceptance(result => {
     const temporary = `${resultFile}.tmp`;
     writeFileSync(temporary, JSON.stringify({ version: contract.version, runId: request.runId,
       candidateSha256: request.candidateSha256, nonce: request.nonce,
-      requestSha256: createHash('sha256').update(bytes).digest('hex'), ...result }), { flag: 'wx' });
+      requestSha256, ...result }), { flag: 'wx' });
     renameSync(temporary, resultFile);
-  }, fail);
+    trace.record('result-publication');
+  }, fail, clock, trace);
 }

@@ -1,3 +1,20 @@
+# 2026-09-13 A1 native-006 provenance candidate
+
+- 005 保持 `FAIL / human / NORMAL_CLOSE_INCOMPLETE`；第一段 `deny → reload → allow → read → display` 已由 automated 與 Human visual 對上，第二次 reload/Ready 衝突仍 `UNKNOWN`。
+- 本輪僅加入 A1 controlled run-local `a1-event-trace.jsonl`：Main 擁有 document generation 與 reload action ID，記錄 trusted handler/acceptance/reload/navigation/Ready/allow/read/display/close/result publication；不改 acceptance sequence、budgets、reload 或 consent/read/revoke semantics。
+- 006 candidate：`tasks/a1-admission-candidate-006.json`，run root `.tmp/a1-native-006`，candidate digest 由 manifest 綁定；artifact 為本輪 source fix build，native 未執行，permit/request/nonce 未建立。
+- deterministic provenance/source/admission/build/hash verification 完成後，下一 obligation 是另行授權的 006 native acceptance；001–005 與 rehearsal evidence immutable，無法以本輪 source candidate 宣稱 A1 PASS。
+
+# 2026-09-13 A1 native-005 — FAIL / NORMAL_CLOSE_INCOMPLETE
+
+- A VERIFIED：固定HEAD `560d8366e6a7b2e6b4302d1fe4e7d9005be28de7`、candidate `37d02b343c2f29db29ae666cd0d83f85aaec327a0d63b438a4f40a30c956c6aa`，先admission verify exit0/CLOSED；005 source/artifact/Electron/environment identities及empty pre-attempt roots匹配，001–004/rehearsal evidence與manifest hashes未變、compatibility cohort未漂移、index空、gates false。
+- B EXECUTED：獨立Human一次性permit，exact schema；只執行一次`node tools/a1-admission.cjs --run`，native attempts1/retries0。沒有retry、fallback、source/candidate修改或第二次launch。
+- C VERIFIED：Result v2 binding成立；`result=FAIL`、phase=`human`、reason=`NORMAL_CLOSE_INCOMPLETE`，events=`[deny,reload,allow,read,display]`。第一段deny/reload/allow/read/display prefix完成；第二次reload/re-consent/read/display及normal close未完成。這不是Human timeout或supervisor timeout。
+- Human visual：Human 回報第一段 `deny → reload → allow → read → display` 與 automated 對上；其後第二次 Reload 並目視看到 Ready，但 automated events 沒有第二個 `reload`，形成 bounded evidence conflict，仍為 `UNKNOWN`。此為 Human visual observation，非 automated screenshot-pipe proof。
+- C lifecycle VERIFIED：root exit1、helper exit0、Job Member=true、ActiveProcesses=0、cleanup VERIFIED_EMPTY；TimedOut/RootTimedOut=false，無query/termination/persistence failure。permit已消耗、active authorization不存在，gates final false。request `f7cfbb7d234e2a3f97131014c5236e20ca8ad7b0cbd462b43a09443f5e24e72d`；result `2322961372c94b6feb2bfd3eb5bef2ebacc8d355594373554c95cfc771b9ddd7`；receipt `e55de3808b0a2b468077eb5ddde7e7f1061f6f78e032f181244de214d4955c2e`；nonce只屬本次request。
+- D evidence：完整原件保留於`.tmp/a1-native-005/`，summary [native-outcome.json](../.tmp/a1-native-005/native-outcome.json)；001/002/003/004/rehearsal unchanged。此 FAIL 的 automated terminal 是 acceptance sequence 未完成／normal close incomplete；Human visual 與 automated 的第二次 Reload/Ready 差異仍無法由 retained trace 解決，不歸因 consent/read defect。
+- 下一obligation：保留005 failure material；A1尚缺第二次reload後trusted Ready、re-consent、第二次read/display與normal close。005 permit/run不可重用，任何未來runtime需新candidate/run/authorization；不外推full-app/worker/company/OS isolation readiness。
+
 # 2026-09-12 A1 native-005 main-owned reload checkpoint
 
 - A complete：baseline HEAD `5dd1288bf8de264e46caba5afc700d80fc9be417`，local reload fix未commit；005 root/manifest原不存在。歷史001–004/rehearsal immutable inventory逐項核對；rehearsal僅NON-ACCEPTANCE diagnostic evidence，不能升格PASS。

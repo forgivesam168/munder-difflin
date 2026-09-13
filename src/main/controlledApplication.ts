@@ -15,6 +15,8 @@ export async function startControlledApplication(mode: ControlledStartup): Promi
   let failureExitRequested = false;
   const fail = (): void => { if (!failureExitRequested) { failureExitRequested = true; app.exit(1); } };
   const acceptance = controlledAcceptance(mode, fail);
+  const trace = acceptance?.trace;
+  trace?.record('application-start', { documentGeneration: 0 });
   for (const key of ['appData', 'userData', 'sessionData', 'logs', 'crashDumps', 'temp'] as const) {
     const path = join(mode.appData, key);
     mkdirSync(path, { recursive: true });
@@ -26,18 +28,24 @@ export async function startControlledApplication(mode: ControlledStartup): Promi
   const documentPath = join(rendererRoot, 'index.html');
   const documentUrl = pathToFileURL(documentPath).href;
   const windows = new Set<BrowserWindow>();
-  const { projectRootGrants } = registerProjectAccess(windows, documentUrl, mode.projectRoot, event => acceptance?.observe(event));
+  let documentGeneration = 0;
+  const frameGenerations = new WeakMap<object, number>();
+  const contextFor = (event: Electron.IpcMainInvokeEvent) => ({
+    documentGeneration: frameGenerations.get(event.senderFrame as object) ?? documentGeneration
+  });
+  const { projectRootGrants } = registerProjectAccess(windows, documentUrl, mode.projectRoot,
+    (event, source) => acceptance?.observe(event, contextFor(source)));
   ipcMain.handle('app:controlledReadDisplayed', (event, content: unknown) => {
     if (!isTrustedRendererIpc(event, documentUrl, [...windows].some(win => win.webContents === event.sender))) {
       throw new Error('Untrusted controlled display sender');
     }
-    acceptance?.display(content);
+    acceptance?.display(content, contextFor(event));
   });
   ipcMain.handle('app:controlledReadReady', event => {
     if (!isTrustedRendererIpc(event, documentUrl, [...windows].some(win => win.webContents === event.sender))) {
       throw new Error('Untrusted controlled Ready sender');
     }
-    acceptance?.ready();
+    acceptance?.ready(contextFor(event));
   });
   ipcMain.handle('app:controlledRead', event => {
     if (!isTrustedRendererIpc(event, documentUrl, [...windows].some(win => win.webContents === event.sender))) {
@@ -57,26 +65,72 @@ export async function startControlledApplication(mode: ControlledStartup): Promi
   });
   windows.add(win);
   const wc = win.webContents;
+  documentGeneration = 1;
+  frameGenerations.set(wc.mainFrame as object, documentGeneration);
+  trace?.setDocumentGeneration(documentGeneration);
+  trace?.record('document-load-request', { documentGeneration });
   const revoke = (): void => { projectRootGrants.get(wc)?.revoke(); projectRootGrants.delete(wc); };
-  let reloadPending = false;
+  let reloadPending: { actionId: string; sourceGeneration: number; targetGeneration: number } | undefined;
+  let reloadSerial = 0;
   ipcMain.handle('app:controlledReload', event => {
     if (!isTrustedRendererIpc(event, documentUrl, windows.has(win) && event.sender === wc)) {
       throw new Error('Untrusted controlled reload sender');
     }
     if (reloadPending) return;
-    reloadPending = true;
+    const sourceGeneration = documentGeneration;
+    const targetGeneration = sourceGeneration + 1;
+    const actionId = `reload-${++reloadSerial}`;
+    reloadPending = { actionId, sourceGeneration, targetGeneration };
+    trace?.record('reload-handler-entry', {
+      documentGeneration: sourceGeneration, targetDocumentGeneration: targetGeneration, reloadActionId: actionId
+    });
     revoke();
     // This explicit action is the sole acceptance reload event producer.
-    acceptance?.observe('reload');
-    if (!failureExitRequested) wc.reload();
+    acceptance?.observe('reload', {
+      documentGeneration: sourceGeneration, targetDocumentGeneration: targetGeneration, reloadActionId: actionId
+    });
+    if (!failureExitRequested) {
+      trace?.record('reload-invocation', {
+        documentGeneration: sourceGeneration, targetDocumentGeneration: targetGeneration, reloadActionId: actionId
+      });
+      wc.reload();
+    }
   });
-  wc.on('did-finish-load', () => { reloadPending = false; });
+  wc.on('did-finish-load', () => {
+    const pending = reloadPending;
+    if (pending) {
+      documentGeneration = pending.targetGeneration;
+      frameGenerations.set(wc.mainFrame as object, documentGeneration);
+      trace?.setDocumentGeneration(documentGeneration);
+      trace?.record('navigation-finished', {
+        documentGeneration, sourceDocumentGeneration: pending.sourceGeneration, reloadActionId: pending.actionId
+      });
+      reloadPending = undefined;
+    } else {
+      frameGenerations.set(wc.mainFrame as object, documentGeneration);
+      trace?.record('navigation-finished', { documentGeneration });
+    }
+  });
   wc.on('did-start-navigation', details => {
-    if (details.isMainFrame && !details.isSameDocument) revoke();
+    if (details.isMainFrame && !details.isSameDocument) {
+      revoke();
+      if (reloadPending) trace?.record('navigation-start', {
+        documentGeneration: reloadPending.targetGeneration,
+        sourceDocumentGeneration: reloadPending.sourceGeneration,
+        reloadActionId: reloadPending.actionId
+      });
+    }
   });
-  wc.on('render-process-gone', () => { revoke(); try { acceptance?.rendererGone(); } finally { fail(); } });
+  wc.on('render-process-gone', () => {
+    revoke();
+    trace?.record('renderer-gone');
+    try { acceptance?.rendererGone(); } finally { fail(); }
+  });
   wc.on('destroyed', revoke);
-  win.on('close', () => { try { acceptance?.finish(); } catch { fail(); } });
+  win.on('close', () => {
+    trace?.record('window-close');
+    try { acceptance?.finish(); } catch { fail(); }
+  });
   win.on('closed', () => { revoke(); windows.delete(win); });
   wc.setWindowOpenHandler(() => ({ action: 'deny' }));
   wc.on('will-navigate', event => event.preventDefault());

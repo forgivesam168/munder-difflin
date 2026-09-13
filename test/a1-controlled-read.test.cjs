@@ -96,7 +96,7 @@ function runtime(mode, options = {}) {
       if (!id.startsWith('.')) throw new Error(`Forbidden module import: ${id}`);
       const target = path.resolve(path.dirname(file), id.endsWith('.json') ? id : `${id}.ts`);
       if (id.endsWith('/a1-contract.json')) return load(target);
-      const allowed = ['bootstrap', 'controlledAcceptance', 'controlledStartup', 'controlledApplication', 'applicationWindow', 'projectIpc', 'projectRoots', 'browserSecurity', 'fs', 'imageTypes'];
+      const allowed = ['a1EventTrace', 'bootstrap', 'controlledAcceptance', 'controlledStartup', 'controlledApplication', 'applicationWindow', 'projectIpc', 'projectRoots', 'browserSecurity', 'fs', 'imageTypes'];
       if (!allowed.includes(path.basename(target, '.ts'))) throw new Error(`Forbidden service import: ${id}`);
       return load(target);
     }
@@ -320,6 +320,53 @@ test('trusted main-owned reload revokes grants, counts once and requires fresh c
   const result=JSON.parse(fs.readFileSync(path.join(mode.appData,'a1-result.json')));
   assert.equal(result.reason,'PASS');
   assert.deepEqual(result.events,['deny','reload','allow','read','display','reload','allow','read','display']);
+});
+
+test('bound controlled lifecycle emits generation and reload provenance in order', async t => {
+  let decision = 0;
+  const { mode, r } = await start(t, { bound: true, consent: () => decision });
+  const wc = r.windows[0].webContents;
+  wc.emit('did-finish-load');
+  await r.api.controlledReadReady();
+  assert.equal((await r.api.readFile(mode.projectRoot, 'readme.txt')).ok, false);
+  await r.api.controlledReload(); wc.finishReload(); await r.api.controlledReadReady();
+  decision = 1;
+  const first = await r.api.readFile(mode.projectRoot, 'readme.txt');
+  assert.equal(first.ok, true); await r.api.controlledReadDisplayed(first.content);
+  await r.api.controlledReload(); wc.finishReload(); await r.api.controlledReadReady();
+  const second = await r.api.readFile(mode.projectRoot, 'readme.txt');
+  assert.equal(second.ok, true); await r.api.controlledReadDisplayed(second.content);
+  r.windows[0].emit('close');
+  const req = JSON.parse(fs.readFileSync(path.join(path.dirname(mode.appData), 'request.json')));
+  const result = JSON.parse(fs.readFileSync(path.join(mode.appData, 'a1-result.json')));
+  const tracePath = path.join(path.dirname(mode.appData), 'a1-event-trace.jsonl');
+  const records = fs.readFileSync(tracePath, 'utf8').trim().split(/\r?\n/).map(line => JSON.parse(line));
+  assert.equal(result.result, 'PASS');
+  assert.deepEqual(records.filter(record => record.kind === 'acceptance-event')
+    .map(record => [record.acceptanceEvent, record.documentGeneration]),
+    [['deny',1],['reload',1],['allow',2],['read',2],['display',2],['reload',2],['allow',3],['read',3],['display',3]]);
+  const actions = records.filter(record => record.kind === 'reload-handler-entry');
+  assert.deepEqual(actions.map(record => record.reloadActionId), ['reload-1', 'reload-2']);
+  for (const action of actions) {
+    const related = records.filter(record => record.reloadActionId === action.reloadActionId);
+    assert.deepEqual(related.map(record => record.kind), ['reload-handler-entry','acceptance-event','reload-invocation','navigation-start','navigation-finished']);
+  }
+  const close = records.findIndex(record => record.kind === 'window-close');
+  const published = records.findIndex(record => record.kind === 'result-publication');
+  assert.ok(close >= 0 && published > close);
+  for (const record of records) assert.equal(record.documentIdentity, 'controlled-read');
+  assert.equal(binding.validateTrace(tracePath, req, result).status, 'VERIFIED');
+});
+
+test('untrusted controlled reload produces no legal provenance action', async t => {
+  const { mode, r } = await start(t, { bound: true });
+  const wc = r.windows[0].webContents;
+  wc.emit('did-finish-load');
+  const handler = r.handlers.get('app:controlledReload');
+  assert.throws(() => handler({ sender: wc, senderFrame: { url: 'https://untrusted.invalid' } }), /Untrusted/);
+  const tracePath = path.join(path.dirname(mode.appData), 'a1-event-trace.jsonl');
+  const records = fs.readFileSync(tracePath, 'utf8').trim().split(/\r?\n/).map(line => JSON.parse(line));
+  assert.equal(records.some(record => record.kind === 'reload-handler-entry'), false);
 });
 
 test('bound product renderer-gone and startup timeout write different terminal reasons', async t => {

@@ -8,7 +8,7 @@ async function buildCandidate() {
   binding.git('merge-base','--is-ancestor',baseline,'HEAD'); // Archive remains fixed; a later scoped checkpoint is reproducible.
   for(const name of ['package.json','package-lock.json','electron.vite.config.ts']) assert.equal(binding.git('hash-object','--path='+name,name).toString().trim(),binding.git('rev-parse',baseline+':'+name).toString().trim());
   assert.ok(!fs.existsSync(run)&&!fs.existsSync(binding.manifestFile),'Candidate already exists; no overwrite/retry');
-  const stage=path.join(root,'.tmp/a1-build-source-005');
+  const stage=path.join(root,'.tmp/a1-build-source-006');
   assert.ok(!fs.existsSync(stage),'Build source already exists');
   binding.safe(path.join(root,'.tmp'));fs.mkdirSync(stage);
   // Git archive contains only committed paths. Compatibility worktree never enters.
@@ -48,13 +48,13 @@ async function buildCandidate() {
   const map=files=>Object.fromEntries(files.map(p=>[p,binding.hash(fs.readFileSync(path.join(root,p)))]));
   const systemRoot=process.env.SystemRoot;assert.ok(systemRoot);binding.safe(systemRoot);
   const candidate={sourceCommit:baseline,runId:binding.runId,sourceInputs,overlaySha256:map(binding.overlay),adapterSha256:map(binding.adapterFiles),
-    build:{command:'node tools/a1-build.cjs',mode:'production',sourceDirectory:'.tmp/a1-build-source-005',write:'memory bundle then exclusive artifact files',envFile:false,posthogKey:'empty',
+    build:{command:'node tools/a1-build.cjs',mode:'production',sourceDirectory:'.tmp/a1-build-source-006',write:'memory bundle then exclusive artifact files',envFile:false,posthogKey:'empty',
       node:process.version,dependencies:Object.fromEntries(['typescript','electron-vite','vite','esbuild'].map(name=>[name,JSON.parse(fs.readFileSync(path.join(root,'node_modules',name,'package.json'))).version]))},
     outputs:binding.inventory(path.join(run,'artifact')),electron:{version:JSON.parse(fs.readFileSync(path.join(root,'node_modules/electron/package.json'))).version,files:binding.inventory(path.join(root,'node_modules/electron/dist'))},
     powershellSha256:binding.hash(fs.readFileSync(binding.safe(binding.paths().powershell))),nodeSha256:binding.hash(fs.readFileSync(binding.safe(process.execPath))),
     systemRoot,configurationSha256:binding.digest({child:binding.environment(systemRoot),helper:binding.environment(systemRoot,true)}),
-    syntheticProject:{root:'.tmp/a1-native-005/project',files:{'readme.txt':binding.hash('A1 synthetic read\n')}},
-    invocation:{executable:'node_modules/electron/dist/electron.exe',entry:'.tmp/a1-native-005/artifact/main/index.js',args:['--munder-controlled-read']},
+    syntheticProject:{root:'.tmp/a1-native-006/project',files:{'readme.txt':binding.hash('A1 synthetic read\n')}},
+    invocation:{executable:'node_modules/electron/dist/electron.exe',entry:'.tmp/a1-native-006/artifact/main/index.js',args:['--munder-controlled-read']},
     contract:binding.contract,timeouts:binding.timeouts(),
     receipt:{requestVersion:1,resultVersion:binding.contract.version,supervisorVersion:1,sequence:['deny','reload','allow','read','display','reload','allow','read','display'],finish:'normal close'},
     limitations:['Native run NOT EXECUTED; no native dialog/full-app/worker/company PASS','Job accounting is not task completion; bound app result also required','Hashes are freshness, not authenticity or loaded-code attestation','Trusted local OS/SystemRoot and existing PowerShell runtime; no OS sandbox/credential isolation','Concurrent same-user changes and hostile launchers not isolated','Ordinary app services bundled but excluded from controlled load graph; dependencies not repackaged']};

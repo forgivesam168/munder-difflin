@@ -8,7 +8,7 @@ import { assertControlledPath } from './controlledStartup';
 
 /** Shared by the full service runtime and the controlled mode of the same app. */
 export function registerProjectAccess(allWindows: Set<BrowserWindow>, rendererDocumentUrl: string, controlledRoot?: string,
-  observe?: (event: 'allow' | 'deny' | 'read') => void) {
+  observe?: (event: 'allow' | 'deny' | 'read', source: Electron.IpcMainInvokeEvent) => void) {
   const projectRootGrants = new WeakMap<Electron.WebContents, ProjectRootGrants>();
 
   async function authorizeProjectRoot(event: Electron.IpcMainInvokeEvent, root: unknown, scope: 'project' | 'inspect' = 'project'): Promise<string> {
@@ -27,7 +27,7 @@ export function registerProjectAccess(allWindows: Set<BrowserWindow>, rendererDo
           : 'This permits file reads, writes and Git operations.'} Saved project entries do not grant access. Declining blocks this access scope until the page reloads or this window is reopened.`,
         buttons: ['Deny', scope === 'inspect' ? 'Allow metadata and display' : 'Allow project access'], defaultId: 0, cancelId: 0, noLink: true
       });
-      observe?.(decision.response === 1 ? 'allow' : 'deny');
+      observe?.(decision.response === 1 ? 'allow' : 'deny', event);
       return decision.response === 1 && isTrustedRendererIpc(event, rendererDocumentUrl,
         [...allWindows].some(w => !w.isDestroyed() && w.webContents === event.sender));
     }, scope);
@@ -111,7 +111,7 @@ export function registerProjectAccess(allWindows: Set<BrowserWindow>, rendererDo
           throw new Error('Untrusted project IPC sender');
         }
       }
-      if (channel === 'fs:readFile' && result?.ok === true) observe?.('read');
+      if (channel === 'fs:readFile' && result?.ok === true) observe?.('read', event);
       return responsePath !== undefined && result?.ok === true
         ? { ...result, path: responsePath } : result;
     });

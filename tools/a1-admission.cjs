@@ -34,6 +34,8 @@ async function run() {
       const raw=fs.readFileSync(binding.safe(path.join(binding.paths().appData,'a1-result.json')));
       const terminal=binding.validateResult(JSON.parse(raw),req,{allowFailure:true});
       receipt.terminal={result:terminal.result,phase:terminal.phase,reason:terminal.reason};
+      receipt.trace=binding.validateTrace(binding.safe(path.join(binding.run,'a1-event-trace.jsonl')),req,terminal,
+        {allowMissing:terminal.result!=='PASS'});
       assert.deepEqual(JSON.parse(fs.readFileSync(binding.safe(path.join(binding.run,'request.json')))),req);
       receipt.resultSha256=binding.hash(raw);
     },
