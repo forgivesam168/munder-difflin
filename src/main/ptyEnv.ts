@@ -1,3 +1,5 @@
+import { CODEX_ENV_ALLOWLIST, isCanonicalAbsolutePath, isCredentialLikeEnvironmentKey } from './codexWorkerContract';
+
 /**
  * Environment construction for agent PTYs, as a pure function so the layering
  * is testable off-process (the same trick `buildMissingCliScript` uses for its
@@ -87,4 +89,102 @@ export function buildPtyEnv(
     // Per-agent hive identity (AGENT_ID, HIVE_ROOT, …) when provided.
     ...(agentEnv ?? {})
   };
+}
+
+/** Explicit inputs for the B1 Codex environment. There is deliberately no
+ * parent/process environment parameter: a future runtime must construct this
+ * allowlist rather than inherit the host or the operator's daily Codex setup.
+ */
+export interface CodexWorkerEnvironmentInput {
+  path: string;
+  home: string;
+  userProfile: string;
+  temp: string;
+  tmp: string;
+  codexHome: string;
+}
+
+const CODEX_ENV_INPUT_KEYS = ['path', 'home', 'userProfile', 'temp', 'tmp', 'codexHome'] as const;
+
+function assertCodexEnvironmentInput(input: CodexWorkerEnvironmentInput): void {
+  if (!input || typeof input !== 'object'
+    || Object.keys(input).sort().join(',') !== [...CODEX_ENV_INPUT_KEYS].sort().join(',')) {
+    throw new Error('Invalid Codex environment inputs');
+  }
+  for (const key of CODEX_ENV_INPUT_KEYS) {
+    const value = input[key];
+    if (typeof value !== 'string' || !value || value.length > 4096 || /[\x00-\x1f]/.test(value)) {
+      throw new Error('Invalid Codex environment inputs');
+    }
+  }
+  if (![input.home, input.userProfile, input.temp, input.tmp, input.codexHome].every(isCanonicalAbsolutePath)) {
+    throw new Error('Codex environment directories must be canonical absolute paths');
+  }
+}
+
+function isEnvironmentRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+/**
+ * Build the fixed B1 Codex environment. This is pure and not connected to
+ * `PtyManager` or any production spawn path in this milestone.
+ */
+export function buildCodexWorkerEnv(input: CodexWorkerEnvironmentInput): Record<string, string> {
+  assertCodexEnvironmentInput(input);
+  return Object.freeze({
+    PATH: input.path,
+    HOME: input.home,
+    USERPROFILE: input.userProfile,
+    TEMP: input.temp,
+    TMP: input.tmp,
+    CODEX_HOME: input.codexHome,
+    TERM: 'xterm-256color',
+    COLORTERM: 'truecolor',
+    FORCE_COLOR: '1'
+  });
+}
+
+/** Validate a constructed B1 environment without consulting host state. */
+export function validateCodexWorkerEnv(
+  value: unknown,
+  expected?: CodexWorkerEnvironmentInput
+): Record<string, string> {
+  if (!isEnvironmentRecord(value)) {
+    throw new Error('Invalid Codex environment');
+  }
+  const env = value;
+  const actualKeys = Object.keys(env).sort();
+  const expectedKeys = [...CODEX_ENV_ALLOWLIST].sort();
+  if (actualKeys.length !== expectedKeys.length || actualKeys.some((key, index) => key !== expectedKeys[index])) {
+    throw new Error('Codex environment is not the fixed allowlist');
+  }
+  if (actualKeys.some(isCredentialLikeEnvironmentKey)) {
+    throw new Error('Credential-like environment variable is forbidden');
+  }
+  for (const key of CODEX_ENV_ALLOWLIST) {
+    const item = env[key];
+    if (typeof item !== 'string' || !item || item.length > 4096 || /[\x00-\x1f]/.test(item)) {
+      throw new Error('Invalid Codex environment value');
+    }
+  }
+  if (![env.HOME, env.USERPROFILE, env.TEMP, env.TMP, env.CODEX_HOME].every(isCanonicalAbsolutePath)) {
+    throw new Error('Codex environment directories must be canonical absolute paths');
+  }
+  if (env.TERM !== 'xterm-256color' || env.COLORTERM !== 'truecolor' || env.FORCE_COLOR !== '1') {
+    throw new Error('Codex environment defaults do not match policy');
+  }
+  if (expected) {
+    const constructed = buildCodexWorkerEnv(expected);
+    for (const key of CODEX_ENV_ALLOWLIST) {
+      if (env[key] !== constructed[key]) throw new Error('Codex environment value mismatch');
+    }
+  }
+  const result: Record<string, string> = {};
+  for (const key of CODEX_ENV_ALLOWLIST) {
+    const item = env[key];
+    if (typeof item !== 'string') throw new Error('Invalid Codex environment value');
+    result[key] = item;
+  }
+  return Object.freeze(result);
 }

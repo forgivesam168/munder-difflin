@@ -5,6 +5,7 @@
  */
 import { autoModeFlagForProvider, hasAutoModeStance, inferAgentProvider } from '../shared/agentProvider';
 import { tokenizeCommand } from '../shared/commandLine';
+import { normalizeCodexExecutableDescriptor, type CodexExecutableDescriptor } from './codexWorkerContract';
 
 export interface WorkerLaunch {
   /** The executable name alone — what the PTY layer resolves and spawns. */
@@ -60,4 +61,27 @@ export function buildWorkerLaunch(opts: {
     typeof opts.requestModel === 'string' && opts.requestModel.trim() ? opts.requestModel.trim() : '';
   const args = [...flags, ...(model && !flags.includes('--model') ? ['--model', model] : [])];
   return { bin, args, command };
+}
+
+/**
+ * B1-only Codex candidate translation. It is intentionally separate from
+ * `buildWorkerLaunch`: the generic worker path remains request-authored and
+ * PATH-resolved, while a future admitted Codex path must receive an approved
+ * absolute executable descriptor and this fixed argv only.
+ */
+export interface CodexWorkerLaunch {
+  executablePath: string;
+  args: readonly string[];
+  shell: false;
+}
+
+export const CODEX_WORKER_ARGV = Object.freeze(['-a', 'never', '-s', 'workspace-write'] as const);
+
+export function buildCodexWorkerLaunch(descriptor: CodexExecutableDescriptor): CodexWorkerLaunch {
+  const executable = normalizeCodexExecutableDescriptor(descriptor);
+  return Object.freeze({
+    executablePath: executable.executablePath,
+    args: Object.freeze([...CODEX_WORKER_ARGV]),
+    shell: false as const
+  });
 }
