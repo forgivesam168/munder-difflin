@@ -1,3 +1,34 @@
+# A milestone closure — CLOSED_ENOUGH_TO_ENTER_B
+
+- A1 FINAL CLOSURE = PASS 且 FROZEN；A1 native acceptance obligation 已 COMPLETE。
+- Thin A milestone closure review 結論：`CLOSED_ENOUGH_TO_ENTER_B`。
+- Evidence-backed B blockers from A：`NONE`。
+- A 可帶入 B 的基礎能力：
+  - fail-closed controlled Windows bootstrap
+  - synthetic project/environment binding
+  - trusted renderer/preload/main IPC
+  - consent/read/revoke/re-consent
+  - generation/stale-result handling
+  - candidate/source/artifact/result/provenance validation
+  - bounded Job ownership / timeout / stop / cleanup receipt
+  - controlled side-effect refusal
+- A closure 不代表 company readiness，也不代表 real Codex worker 已可直接執行。
+- 以下仍屬 B；B runtime 必須在其 contract 完成前保持關閉：
+  - exact Codex CLI identity/version/path
+  - worker synthetic root
+  - minimal environment allowlist
+  - credential/provider handling
+  - network policy
+  - PTY/Job ownership
+  - start/stop semantics
+  - result acceptance
+  - cleanup receipt
+  - CLI approval/sandbox behavior
+- C/H/R obligations 保持未完成，但不阻擋開始 B 的 bounded engineering。
+- 不建立預設 A2/A3/A4。
+- 原始 31 success criteria 完全不變；A/B/C/H/R 只是 execution roadmap。
+- 下一 phase：B — real Codex worker：start / supervision / result acceptance / stop。
+
 # 2026-09-13 A1 native-007 — PASS / FINAL CLOSURE EVIDENCE
 
 - A1 FINAL CLOSURE = PASS at Git checkpoint `02cf5d8704525dd0df9c41db0a8bfa1c58eab68c`; candidate `a1-native-007`, SHA256 `640b5d19573fb7d71e0d39562ea0d70714a4cae9f38dbbb4c58e419fcd9a7c7b`.
