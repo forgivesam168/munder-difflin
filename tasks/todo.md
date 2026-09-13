@@ -1,3 +1,22 @@
+# 2026-09-13 A1 native-007 — FINAL CLOSURE CANDIDATE
+
+- A1 feature scope frozen; controlled behavior, provenance, budgets, sequence, Result v2, and supervisor semantics remain unchanged.
+- 006 verified the complete required 9-event core path (`deny → reload → allow → read → display → reload → allow → read → display`) with generations 1 → 2 → 3, two reloads, two Ready acknowledgements, re-consent, read/display, provenance validation, and clean Job/process cleanup.
+- 006 remains `FAIL / close / SEQUENCE_MISMATCH` solely because Human triggered an extra reload after the required sequence; evidence is immutable and is not rewritten as PASS.
+- 007 is the final closure candidate: run root `.tmp/a1-native-007`, candidate digest `640b5d19573fb7d71e0d39562ea0d70714a4cae9f38dbbb4c58e419fcd9a7c7b`; no permit/request/attempt exists.
+- A1 remaining obligation: complete the same exact 9-event sequence, then normal close.
+- No further A1 evolution unless a new reproducible product defect is proven.
+
+# 2026-09-13 A1 native-006 — FAIL / close SEQUENCE_MISMATCH
+
+- A VERIFIED：固定 checkpoint `980a51b4726aee4e50e8e9840bc0e710f5d4b345`、candidate `e48bc86f2652b49b819954ddafd9bd03a6128918b1fb9b1a6bd0db55a7d079ca`、source/artifact/Electron/configuration/environment identities 與 fresh roots 通過 admission verify；006 無 prior marker，001–005/rehearsal、compatibility cohort、index 與 gates 未漂移。
+- B EXECUTED：依 exact four-key permit 只執行一次 `node tools/a1-admission.cjs --run`，native attempts=1、retries=0；permit 已消耗，沒有 retry、fallback 或第二次 launch。
+- C VERIFIED：Result v2 binding 成立；`result=FAIL`、phase=`close`、reason=`SEQUENCE_MISMATCH`。automated events 為 `deny → reload → allow → read → display → reload → allow → read → display → reload`，第十個 event 是預期 sequence 完成後的額外 reload。
+- Provenance VERIFIED：`a1-event-trace.jsonl` 26 records；generation 1 Ready、`reload-1` 1→2、generation 2 Ready、`reload-2` 2→3、generation 3 Ready；`reload-3` 僅有 handler-entry/acceptance event，未進入 reload invocation、navigation 或 generation 4 Ready，隨即 publication terminal failure。
+- Human visual UNKNOWN：本 run 尚未取得 Human screenshot/visual observation；不能由 automated trace 推測最後一次 reload 的實際操作來源。此 FAIL 不改寫為 consent/read defect 或 A1 PASS。
+- D lifecycle VERIFIED：root exit1、helper exit0、Job Member=true、ActiveProcesses=0、cleanup `VERIFIED_EMPTY`；無 workload/outer/query/termination/persistence failure。request SHA256 `80d2224b9a5d1d19f06d8cebc0a38e9d026ca772d46ad9a1139c9242a93ee357`；result SHA256 `de39674637dbb285b9d7cf7f744aad5c1bcf8aac7de40b6e60943232272e7a81`；trace SHA256 `947de707170b40885e755763b2b3082a0833c8386e6f60800388436d08c1ca4c`；receipt SHA256 `1276837d713d66051a779205c74b7c6808e03662c85565d8716dbf24b0ec17b5`；used authorization SHA256 `9505373e1e6a1f27beddd089a314d055722664d37257019d7e13ad29b857e029`。
+- Remaining：006 evidence immutable；A1 尚不能宣稱 PASS。需另行決定是否補 Human visual/provenance correlation 或建立新 candidate；本輪不 retry、不修改 source、不開始 B/C/H/R。
+
 # 2026-09-13 A1 native-006 provenance candidate
 
 - 005 保持 `FAIL / human / NORMAL_CLOSE_INCOMPLETE`；第一段 `deny → reload → allow → read → display` 已由 automated 與 Human visual 對上，第二次 reload/Ready 衝突仍 `UNKNOWN`。

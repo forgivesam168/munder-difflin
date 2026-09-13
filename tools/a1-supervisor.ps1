@@ -2,7 +2,7 @@
 $ErrorActionPreference = 'Stop'
 if ($args.Count -ne 0) { throw 'A1 supervisor accepts no arguments' }
 $repository = Split-Path -Parent $PSScriptRoot
-$run = Join-Path $repository '.tmp/a1-native-006'
+$run = Join-Path $repository '.tmp/a1-native-007'
 if ([Environment]::CurrentDirectory -cne $run) { throw 'Fixed A1 cwd required' }
 function Assert-A1Path([string]$Path) {
     if (-not [IO.Path]::IsPathFullyQualified($Path) -or [IO.Path]::GetFullPath($Path) -cne $Path) { throw 'Canonical path required' }
@@ -45,8 +45,8 @@ if (($permit.Keys | Sort-Object) -join ',' -cne 'candidateSha256,expiresAt,runId
     ($request.Keys | Sort-Object) -join ',' -cne 'candidateSha256,environmentSha256,nonce,runId,version' -or
     $permit.expiresAt -isnot [long] -or $permit.version -isnot [long] -or $request.version -isnot [long] -or
     $permit.expiresAt -gt ([DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds() + 600000)) { throw 'Invalid A1 permit/request schema' }
-if ($permit.version -ne 1 -or $permit.runId -cne 'a1-native-006' -or $permit.candidateSha256 -cne $payloadHash -or
-    $request.version -ne 1 -or $request.runId -cne 'a1-native-006' -or $request.candidateSha256 -cne $payloadHash -or
+if ($permit.version -ne 1 -or $permit.runId -cne 'a1-native-007' -or $permit.candidateSha256 -cne $payloadHash -or
+    $request.version -ne 1 -or $request.runId -cne 'a1-native-007' -or $request.candidateSha256 -cne $payloadHash -or
     $request.nonce -cnotmatch '^[a-f0-9]{64}$' -or $request.environmentSha256 -cne $candidate.configurationSha256 -or
     $permit.expiresAt -le [DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds()) { throw 'A1 permit/request mismatch or expiry' }
 foreach ($map in @($candidate.adapterSha256, $candidate.overlaySha256)) {
