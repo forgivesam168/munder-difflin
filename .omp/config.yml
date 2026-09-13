@@ -1,0 +1,66 @@
+# Munder — OMP project-local settings.
+#
+# Loaded only when OMP's working directory has a non-empty `.omp/` directory; deep-merged
+# over `~/.omp/agent/config.yml`. Records merge, arrays are REPLACED wholesale — so nothing
+# array-valued is set here.
+#
+# Deliberately NOT set here:
+#   modelRoles.default    — Main's model stays the Human's choice (global config).
+#   tools.approvalMode    — exec-level prompting would make the Human a per-command approver;
+#                           the authority gate is the deny list below plus .omp/RULES.md.
+#   disabledProviders / extensions — replacing global arrays would silently change unrelated behaviour.
+#   lsp / astGrep toggles — `astGrep.enabled` and `task.enableLsp` are false by default, so
+#                           subagents currently lose `lsp` and `ast_grep`. That is inherited
+#                           behaviour; flipping it is a separate decision, not part of this harness.
+
+# Route `/model` role assignments to THIS repository's `.omp/config.yml` instead of the global
+# config, so Munder role tuning cannot leak into other projects. VERIFIED supported value
+# (`omp config set modelRoleStorage __probe__` -> "Valid values: global, project").
+modelRoleStorage: project
+
+modelRoles:
+  # Role -> concrete model. Workflow logic references roles only, never model ids, so retargeting
+  # a model or a whole provider is a one-line change here.
+  #
+  # PROVISIONAL ROUTING — every entry below is a working default, not an architecture requirement.
+  # None of these choices is backed by Munder field evidence yet; do not cite them as "the better
+  # model". `default` is intentionally absent so Main stays the Human's selection.
+  smol: cliproxyapi/deepseek-v4.1-flash:low  # PROVISIONAL — reconnaissance, scout, tiny background work
+  task: cliproxyapi/gpt-5.6-luna:medium      # PROVISIONAL — routine bounded implementation
+  slow: cliproxyapi/deepseek-v4-pro:high     # PROVISIONAL — first independent review
+  risk: cliproxyapi/kimi-k2.7-code:high      # PROVISIONAL — second review; family separation is INFERENCE
+  deep: cliproxyapi/gpt-5.6-sol:high         # PROVISIONAL — escalated implementation
+
+task:
+  # Main -> exactly one delegation level. Children get no `task` tool, so subagents cannot
+  # spawn subagents and integration stays Main's responsibility.
+  maxRecursionDepth: 1
+  # This repository drives Electron, native modules and ConPTY workloads. Bound the fan-out so
+  # four concurrent subagents cannot each contend for the same Windows process/terminal resources.
+  maxConcurrency: 4
+
+bash:
+  patterns:
+    # Ordered; first match wins. `deny` is absolute — it applies in every approval mode, including
+    # headless `yolo` subagents, and matches a tokenised segment of a compound command. It is NOT
+    # containment: it matches literal text plus `*` only, so an absolute `git.exe` path, a
+    # variable-built command, or `eval` can evade it. See `.omp/AGENTS.md` for that limit.
+    # Everything NOT listed here stays Human-gated by `.omp/RULES.md`.
+    - match: "git push*"
+      approval: deny
+    - match: "git reset --hard*"
+      approval: deny
+    - match: "git clean -*"
+      approval: deny
+    - match: "git stash drop*"
+      approval: deny
+    - match: "git stash clear*"
+      approval: deny
+    - match: "git rebase*"
+      approval: deny
+    - match: "git filter-branch*"
+      approval: deny
+    - match: "git commit --amend*"
+      approval: deny
+    - match: "git restore*"
+      approval: deny
