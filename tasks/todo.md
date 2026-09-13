@@ -1,3 +1,15 @@
+# 2026-09-13 A1 native-007 — PASS / FINAL CLOSURE EVIDENCE
+
+- A1 FINAL CLOSURE = PASS at Git checkpoint `02cf5d8704525dd0df9c41db0a8bfa1c58eab68c`; candidate `a1-native-007`, SHA256 `640b5d19573fb7d71e0d39562ea0d70714a4cae9f38dbbb4c58e419fcd9a7c7b`.
+- Result v2 PASS / close / PASS; exact acceptance events are deny → reload → allow → read → display → reload → allow → read → display with attempts=1 and retries=0.
+- Provenance validator PASS: 25 trace records; generation 1 initial Ready, reload-1 1→2 with generation 2 Ready, reload-2 2→3 with generation 3 Ready; both re-consents and read/display pairs are bound to the new generation.
+- Lifecycle PASS: root exit 0, helper exit 0, Job Member=true, ActiveProcesses=0, cleanup VERIFIED_EMPTY, no timeout/query/termination/persistence failure; close sequence 24 precedes result publication sequence 25.
+- Binding PASS: request SHA256 `996d0faefc1d40ca413ad978fa3e7a8611d49067eb5ed69e02ad15a1f5ed3e72`; result SHA256 `619204f9ad5b905b4c9cc6f83cf2557128b1d00ddc6a48432fd88f428b9c2b35`; trace SHA256 `dfd915b2686ebd35ed3fc31e1ce83dae9084900f3e8c2ecd4c99cedb84c3743e`; supervisor receipt SHA256 `3c526cc4dc4517ba90112a97f02291da633f6ad1cf6066ad3677e014ea20c5f5`; used authorization SHA256 `febd97217873516c7772f6cba7fe4b33f841ea16aa38cab1437152e5275b1d5f`; native-outcome SHA256 `1109ae4f50f8e3bfcd93c640165a2c2e1139905fdae603b1ad14644baa8c6037`.
+- No independent screenshot/accessibility artifact was captured because the computer-use RPC was unavailable; optical proof is not claimed, and no evidence conflict was recorded.
+- Permit consumed: `authorization.json` absent, `authorization.used.json` present; native gates remain false. 001–006 and rehearsal inventories remain preserved.
+- A1 feature scope is FROZEN; native acceptance obligation is COMPLETE; no 008 is to be created. The original 31 success criteria remain unchanged.
+- Human roadmap decision: next step is only a thin A milestone closure review for an evidence-backed blocker to B; if none exists, proceed to B real Codex worker start/supervision/result acceptance/stop. Do not create default A2/A3/A4 milestones.
+
 # 2026-09-13 A1 native-007 — FINAL CLOSURE CANDIDATE
 
 - A1 feature scope frozen; controlled behavior, provenance, budgets, sequence, Result v2, and supervisor semantics remain unchanged.
