@@ -16,11 +16,13 @@
 param(
     [switch]$CompileOnly,
     [switch]$Native,
+    [switch]$AdmissionOnly,
     [ValidateSet('normal-descendant', 'root-early-exit', 'bounded-stop', 'timeout',
         'query-failure', 'helper-failure', 'receipt-failure', 'unrelated-sentinel', 'pty-io')]
     [string]$Scenario = 'normal-descendant',
     [string]$NodeExecutable,
-    [string]$ProofRoot
+    [string]$ProofRoot,
+    [string]$AdmissionRoot
 )
 
 $ErrorActionPreference = 'Stop'
@@ -83,13 +85,40 @@ $fixtureIdentity = [ordered]@{
     contract = 'fixed inert descendant and PTY I/O fixture'
 }
 
+function Get-NativeExecutionState {
+    param([bool]$NativeEntryAttempted, [bool]$NativeReceiptReturned)
+    if (-not $NativeEntryAttempted) { return 'NOT_ATTEMPTED' }
+    if (-not $NativeReceiptReturned) { return 'ATTEMPTED_NO_RECEIPT' }
+    return 'EXECUTED_WITH_RECEIPT'
+}
+
+function Get-SafeErrorMetadata {
+    param([Parameter(Mandatory)][System.Exception]$Exception)
+    $hResult = $null
+    $win32ErrorCode = $null
+    if ($Exception.PSObject.Properties['HResult']) { $hResult = [int]$Exception.HResult }
+    if ($Exception -is [ComponentModel.Win32Exception]) { $win32ErrorCode = [int]$Exception.NativeErrorCode }
+    return [ordered]@{ hResult = $hResult; win32ErrorCode = $win32ErrorCode }
+}
+
 function New-Receipt {
     param(
         [Parameter(Mandatory)][string]$Result,
         [Parameter(Mandatory)][string]$CleanupState,
         [bool]$NativeExecuted = $false,
         [string]$FailureStage = $null,
-        [object]$Native = $null
+        [object]$Native = $null,
+        [bool]$NativeEntryAttempted = $false,
+        [bool]$NativeReceiptReturned = $false,
+        [string]$NativeExecutionState = $null,
+        [string]$OuterFailureStage = $null,
+        [ValidateSet('NONE', 'ADMISSION', 'COMPILE', 'ENVIRONMENT', 'NATIVE_ENTRY', 'NATIVE_RECEIPT', 'DURABLE_RECEIPT', 'NATIVE_LIFECYCLE')]
+        [string]$ErrorCategory = 'NONE',
+        [Nullable[int]]$ErrorHResult = $null,
+        [Nullable[int]]$Win32ErrorCode = $null,
+        [ValidateSet('NOT_RUN', 'PASS', 'FAIL', 'UNKNOWN')]
+        [string]$AdmissionResult = 'NOT_RUN',
+        [string[]]$AdmissionChecks = @()
     )
     $get = {
         param([string]$Name, $Default)
@@ -99,6 +128,12 @@ function New-Receipt {
         }
         return $Default
     }
+    $nativeErrorCategory = & $get 'errorCategory' 'NONE'
+    $nativeHResult = & $get 'errorHResult' $null
+    $nativeWin32ErrorCode = & $get 'win32ErrorCode' $null
+    $effectiveErrorCategory = if ($ErrorCategory -ne 'NONE') { $ErrorCategory } else { [string]$nativeErrorCategory }
+    $effectiveHResult = if ($null -ne $ErrorHResult) { $ErrorHResult } else { $nativeHResult }
+    $effectiveWin32ErrorCode = if ($null -ne $Win32ErrorCode) { $Win32ErrorCode } else { $nativeWin32ErrorCode }
     return [ordered]@{
         schemaVersion = 1
         proofId = 'munder-b1-conpty-job-ownership'
@@ -126,9 +161,25 @@ function New-Receipt {
         # claimed as worker descendants; their lifecycle is separate.
         workerTreeClaim = 'synthetic root and its descendants only'
         pseudoConsoleHostIncluded = $false
+        unrelatedSentinelCreated = [bool](& $get 'unrelatedSentinelCreated' $false)
+        unrelatedSentinelProcessId = & $get 'unrelatedSentinelProcessId' $null
+        unrelatedSentinelExit = & $get 'unrelatedSentinelExit' $null
+        unrelatedSentinelAliveAfterStop = [bool](& $get 'unrelatedSentinelAliveAfterStop' $false)
+        unrelatedSentinelOutsideProofJob = [bool](& $get 'unrelatedSentinelOutsideProofJob' $false)
+        unrelatedSentinelCleanupVerified = [bool](& $get 'unrelatedSentinelCleanupVerified' $false)
+        unrelatedSentinelCleanupState = [string](& $get 'unrelatedSentinelCleanupState' 'UNKNOWN')
+        admissionResult = $AdmissionResult
+        admissionChecks = @($AdmissionChecks)
         result = $Result
         nativeExecuted = $NativeExecuted
-        failureStage = if ($FailureStage) { $FailureStage } else { & $get 'failureStage' $null }
+        nativeEntryAttempted = $NativeEntryAttempted
+        nativeReceiptReturned = $NativeReceiptReturned
+        nativeExecutionState = if ($NativeExecutionState) { $NativeExecutionState } else { Get-NativeExecutionState -NativeEntryAttempted $NativeEntryAttempted -NativeReceiptReturned $NativeReceiptReturned }
+        outerFailureStage = if ([string]::IsNullOrEmpty($OuterFailureStage)) { $null } else { $OuterFailureStage }
+        errorCategory = $effectiveErrorCategory
+        errorHResult = $effectiveHResult
+        win32ErrorCode = $effectiveWin32ErrorCode
+        failureStage = if ($FailureStage) { $FailureStage } elseif ($OuterFailureStage) { $OuterFailureStage } else { & $get 'failureStage' $null }
     }
 }
 
@@ -150,21 +201,39 @@ function Write-Receipt {
     [Console]::Out.WriteLine($json)
 }
 
-function Assert-NativeInput {
-    if (-not $NodeExecutable -or -not $ProofRoot) { throw 'Native mode requires fixed NodeExecutable and ProofRoot' }
+function Assert-FixedInputs {
+    if (-not $NodeExecutable) { throw 'Fixed NodeExecutable is required' }
     $node = Get-CanonicalRegularFile -Path $NodeExecutable
     if ([IO.Path]::GetExtension($node) -cne '.exe' -or
         [IO.Path]::GetFileName($node) -cne 'node.exe') { throw 'Native executable must be the direct node.exe file' }
     if ($fixturePath -cne [IO.Path]::GetFullPath((Join-Path $repository 'test\fixtures\research-job-conpty-child.cjs'))) {
         throw 'Unexpected fixed ConPTY fixture'
     }
+    return $node
+}
+
+function Assert-ProofRoot {
+    if (-not $ProofRoot) { throw 'Native mode requires fixed ProofRoot' }
+    if ($AdmissionRoot) { throw 'Native mode cannot accept AdmissionRoot' }
     $tmp = [IO.Path]::GetFullPath((Join-Path $repository '.tmp'))
     if ([IO.Path]::GetDirectoryName($ProofRoot) -cne $tmp -or
         [IO.Path]::GetFileName($ProofRoot) -cnotmatch '^conpty-job-proof-[A-Za-z0-9]{6}$') {
         throw 'ProofRoot must be a fixed direct synthetic .tmp child'
     }
     if ([IO.Directory]::Exists($ProofRoot)) { $null = Get-CanonicalDirectory -Path $ProofRoot }
-    return $node
+    return [IO.Path]::GetFullPath($ProofRoot)
+}
+
+function Assert-AdmissionRoot {
+    if (-not $AdmissionRoot) { throw 'AdmissionOnly requires a separate AdmissionRoot' }
+    if ($ProofRoot) { throw 'AdmissionOnly cannot accept ProofRoot' }
+    $tmp = [IO.Path]::GetFullPath((Join-Path $repository '.tmp'))
+    if ([IO.Path]::GetDirectoryName($AdmissionRoot) -cne $tmp -or
+        [IO.Path]::GetFileName($AdmissionRoot) -cnotmatch '^conpty-admission-[A-Za-z0-9]{6}$') {
+        throw 'AdmissionRoot must be a fixed direct synthetic .tmp child'
+    }
+    if ([IO.Directory]::Exists($AdmissionRoot)) { $null = Get-CanonicalDirectory -Path $AdmissionRoot }
+    return [IO.Path]::GetFullPath($AdmissionRoot)
 }
 
 function New-NativeEnvironmentBlock {
@@ -178,18 +247,18 @@ function New-NativeEnvironmentBlock {
         throw 'Required Windows runtime paths are invalid'
     }
     $nodeDir = [IO.Path]::GetDirectoryName($NodePath)
-    $home = [IO.Path]::Combine($Root, 'home')
-    $profile = [IO.Path]::Combine($Root, 'user-profile')
+    $homePath = [IO.Path]::Combine($Root, 'home')
+    $userProfilePath = [IO.Path]::Combine($Root, 'user-profile')
     $temp = [IO.Path]::Combine($Root, 'temp')
-    foreach ($directory in @($home, $profile, $temp)) {
+    foreach ($directory in @($homePath, $userProfilePath, $temp)) {
         $null = [IO.Directory]::CreateDirectory($directory)
     }
     $values = [ordered]@{
         SystemRoot = $systemRoot
         ComSpec = $comSpec
         PATH = "$nodeDir;$systemRoot\System32"
-        HOME = $home
-        USERPROFILE = $profile
+        HOME = $homePath
+        USERPROFILE = $userProfilePath
         TEMP = $temp
         TMP = $temp
         TERM = 'xterm-256color'
@@ -203,6 +272,32 @@ function New-NativeEnvironmentBlock {
         }
     }
     return ([string]::Join([char]0, @($values.GetEnumerator() | ForEach-Object { "$($_.Key)=$($_.Value)" })) + [char]0 + [char]0)
+}
+
+function Assert-BoundedEnvironmentBlock {
+    param([Parameter(Mandatory)][string]$EnvironmentBlock, [Parameter(Mandatory)][string]$Root, [Parameter(Mandatory)][string]$NodePath)
+    $entries = @($EnvironmentBlock -split [char]0 | Where-Object { $_ })
+    $expectedKeys = @('SystemRoot', 'ComSpec', 'PATH', 'HOME', 'USERPROFILE', 'TEMP', 'TMP', 'TERM', 'COLORTERM', 'FORCE_COLOR', 'NODE_DISABLE_COMPILE_CACHE')
+    $actualKeys = @($entries | ForEach-Object { ($_ -split '=', 2)[0] })
+    if ($actualKeys.Count -ne $expectedKeys.Count -or (@($actualKeys | Sort-Object -Unique).Count -ne $expectedKeys.Count) -or
+        (@($actualKeys | Where-Object { $_ -notin $expectedKeys }).Count -ne 0)) {
+        throw 'Bounded environment key allowlist validation failed'
+    }
+    $values = @{}
+    foreach ($entry in $entries) {
+        $pair = $entry -split '=', 2
+        if ($pair.Count -ne 2) { throw 'Bounded environment entry is malformed' }
+        $values[$pair[0]] = $pair[1]
+    }
+    $rootPrefix = $Root.TrimEnd('\') + '\'
+    foreach ($key in @('HOME', 'USERPROFILE', 'TEMP', 'TMP')) {
+        if (-not $values[$key].StartsWith($rootPrefix, [StringComparison]::OrdinalIgnoreCase)) {
+            throw "Bounded environment path escaped synthetic root for $key"
+        }
+    }
+    $nodeDir = [IO.Path]::GetDirectoryName($NodePath)
+    if ($values['PATH'] -cne "$nodeDir;$($values['SystemRoot'])\System32") { throw 'Bounded PATH validation failed' }
+    return $true
 }
 
 $nativeSource = @'
@@ -235,9 +330,19 @@ namespace Munder.Research {
         public bool forcedStop;
         public bool unrelatedProcessTouched;
         public bool unrelatedSentinelSurvived;
+        public bool unrelatedSentinelCreated;
+        public int? unrelatedSentinelProcessId;
+        public int? unrelatedSentinelExit;
+        public bool unrelatedSentinelAliveAfterStop;
+        public bool unrelatedSentinelOutsideProofJob;
+        public bool unrelatedSentinelCleanupVerified;
+        public string unrelatedSentinelCleanupState = "UNKNOWN";
         public string result = "UNKNOWN";
         public bool nativeExecuted = true;
         public string failureStage;
+        public string errorCategory = "NONE";
+        public int? errorHResult;
+        public int? win32ErrorCode;
     }
 
     public static class ConptyJobProofNative {
@@ -327,11 +432,12 @@ namespace Munder.Research {
         [DllImport("kernel32.dll", SetLastError = true)]
         [return: MarshalAs(UnmanagedType.Bool)]
         static extern bool GetExitCodeProcess(IntPtr hProcess, out uint lpExitCode);
-        [DllImport("kernel32.dll", SetLastError = false)]
-        static extern IntPtr GetCurrentProcess();
         [DllImport("kernel32.dll", SetLastError = true)]
         [return: MarshalAs(UnmanagedType.Bool)]
         static extern bool IsProcessInJob(IntPtr processHandle, IntPtr jobHandle, out bool result);
+        [DllImport("kernel32.dll", SetLastError = true)]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        static extern bool TerminateProcess(IntPtr processHandle, uint exitCode);
         [DllImport("kernel32.dll", SetLastError = true)]
         [return: MarshalAs(UnmanagedType.Bool)]
         static extern bool TerminateJobObject(IntPtr hJob, uint uExitCode);
@@ -387,6 +493,13 @@ namespace Munder.Research {
         static void CheckHr(int value, string stage) {
             if (value != 0) throw new InvalidOperationException(stage + ": HRESULT=0x" + value.ToString("X8"));
         }
+        static void CaptureSafeError(ConptyJobProofReceipt receipt, Exception error, string stage, string category) {
+            receipt.failureStage = stage;
+            receipt.errorCategory = category;
+            receipt.errorHResult = error.HResult;
+            var win32 = error as Win32Exception;
+            if (win32 != null) receipt.win32ErrorCode = win32.NativeErrorCode;
+        }
         static string Quote(string value) {
             if (value == null || value.IndexOf('\0') >= 0) throw new ArgumentException("Invalid fixed argument");
             var result = new StringBuilder("\"");
@@ -408,6 +521,7 @@ namespace Munder.Research {
                 case "bounded-stop": argument = "--bounded-stop"; break;
                 case "timeout": argument = "--timeout"; break;
                 case "pty-io": argument = "--pty-io"; break;
+                case "sentinel": argument = "--sentinel"; break;
                 case "query-failure": argument = "--root-early-exit"; break;
                 case "helper-failure": argument = "--root-early-exit"; break;
                 case "receipt-failure": argument = "--root-early-exit"; break;
@@ -429,6 +543,14 @@ namespace Munder.Research {
                 (new DirectoryInfo(root).Attributes & FileAttributes.ReparsePoint) != 0)
                 throw new ArgumentException("Synthetic proof root must be canonical and non-reparse");
             FixedCommand(executable, fixture, scenario);
+        }
+
+        static void CreateFixedSentinel(string executable, string fixture, string root, IntPtr environmentBlock, out ProcessInformation sentinel) {
+            var startup = new StartupInfoEx();
+            startup.StartupInfo.cb = (uint)Marshal.SizeOf(typeof(StartupInfoEx));
+            var commandLine = new StringBuilder(FixedCommand(executable, fixture, "sentinel"));
+            Check(CreateProcessW(executable, commandLine, IntPtr.Zero, IntPtr.Zero, false,
+                CREATE_UNICODE_ENVIRONMENT, environmentBlock, root, ref startup, out sentinel), "Create sentinel");
         }
         static bool QueryActive(IntPtr job, out int active, out int error) {
             BasicAccountingInformation info;
@@ -466,6 +588,8 @@ namespace Munder.Research {
             IntPtr pseudoConsole = IntPtr.Zero, attributes = IntPtr.Zero, jobValue = IntPtr.Zero, pseudoValue = IntPtr.Zero;
             bool attributesInitialized = false, rootExited = false, forcedCleanup = false, closeOkay = true;
             ProcessInformation process = new ProcessInformation();
+            ProcessInformation sentinel = new ProcessInformation();
+            bool sentinelCreated = false;
             OutputDrain drain = null;
             try {
                 ValidateFixedInputs(executable, fixture, root, scenario);
@@ -474,6 +598,13 @@ namespace Munder.Research {
                 var limits = new ExtendedLimitInformation();
                 limits.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
                 Check(SetInformationJobObject(job, JobObjectExtendedLimitInformation, ref limits, (uint)Marshal.SizeOf(typeof(ExtendedLimitInformation))), "SetInformationJobObject");
+
+                if (scenario == "unrelated-sentinel") {
+                    CreateFixedSentinel(executable, fixture, root, environmentBlock, out sentinel);
+                    sentinelCreated = true;
+                    receipt.unrelatedSentinelCreated = true;
+                    receipt.unrelatedSentinelProcessId = checked((int)sentinel.dwProcessId);
+                }
 
                 var security = new SecurityAttributes { nLength = Marshal.SizeOf(typeof(SecurityAttributes)), bInheritHandle = 1 };
                 Check(CreatePipe(out inputRead, out inputWrite, ref security, 0), "CreatePipe input");
@@ -548,29 +679,35 @@ namespace Munder.Research {
                         throw new InvalidOperationException("Root exit did not leave the expected owned descendant");
                     if (scenario == "helper-failure" || scenario == "receipt-failure")
                         throw new UnknownProof("Injected proof helper/receipt failure");
-                    if (scenario == "bounded-stop" || scenario == "timeout" || scenario == "root-early-exit") {
+                    if (scenario == "bounded-stop" || scenario == "timeout" || scenario == "root-early-exit" || scenario == "unrelated-sentinel") {
                         receipt.forcedStop = true; forcedCleanup = true;
                         if (!RequestBoundedStop(job, receipt)) throw new Win32Exception(Marshal.GetLastWin32Error(), "Bounded Job stop");
                     }
-                    if (scenario == "normal-descendant" || scenario == "unrelated-sentinel") {
+                    if (scenario == "normal-descendant") {
                         if (!WaitActiveZero(job, 10000, out active, out queryError)) throw new UnknownProof("Normal Job completion was not verified");
                         receipt.activeProcessesFinal = active;
                         if (!drain.Contains("DESCENDANT_DONE\n", 2000)) throw new InvalidOperationException("Descendant completion marker missing");
                     }
                     if (scenario == "unrelated-sentinel") {
-                        uint currentExit;
-                        Check(GetExitCodeProcess(GetCurrentProcess(), out currentExit), "Unrelated sentinel query");
-                        if (currentExit != 259) throw new InvalidOperationException("Unrelated sentinel did not survive");
-                        receipt.unrelatedSentinelSurvived = true;
+                        if (!sentinelCreated || sentinel.hProcess == IntPtr.Zero) throw new InvalidOperationException("Independent sentinel was not created");
+                        bool sentinelInProofJob;
+                        Check(IsProcessInJob(sentinel.hProcess, job, out sentinelInProofJob), "Unrelated sentinel Job query");
+                        receipt.unrelatedSentinelOutsideProofJob = !sentinelInProofJob;
+                        uint sentinelExit;
+                        Check(GetExitCodeProcess(sentinel.hProcess, out sentinelExit), "Unrelated sentinel liveness query");
+                        receipt.unrelatedSentinelAliveAfterStop = sentinelExit == 259;
+                        receipt.unrelatedSentinelSurvived = receipt.unrelatedSentinelAliveAfterStop;
+                        if (!receipt.unrelatedSentinelOutsideProofJob || !receipt.unrelatedSentinelAliveAfterStop)
+                            throw new InvalidOperationException("Independent sentinel was touched by proof Job stop");
                     }
                 }
                 receipt.result = "PASS";
             } catch (UnknownProof error) {
                 receipt.result = "UNKNOWN";
-                receipt.failureStage = error.Message;
+                CaptureSafeError(receipt, error, "native-query", "NATIVE_QUERY");
             } catch (Exception error) {
                 receipt.result = "FAIL";
-                receipt.failureStage = error is Win32Exception ? "native-call-failed" : "proof-assertion-failed";
+                CaptureSafeError(receipt, error, error is Win32Exception ? "native-call" : "native-assertion", error is Win32Exception ? "NATIVE_CALL" : "NATIVE_ASSERTION");
             } finally {
                 if (job != IntPtr.Zero && receipt.result != "PASS" && !forcedCleanup) {
                     if (RequestBoundedStop(job, receipt)) { forcedCleanup = true; }
@@ -613,6 +750,31 @@ namespace Munder.Research {
                 if (jobValue != IntPtr.Zero) { Marshal.FreeHGlobal(jobValue); jobValue = IntPtr.Zero; }
                 CloseOwned(ref process.hThread, ref closeOkay);
                 CloseOwned(ref process.hProcess, ref closeOkay);
+                if (sentinelCreated && sentinel.hProcess != IntPtr.Zero) {
+                    uint sentinelWait = WaitForSingleObject(sentinel.hProcess, 3000);
+                    if (sentinelWait == WAIT_TIMEOUT) {
+                        if (TerminateProcess(sentinel.hProcess, 0xE0010002)) {
+                            sentinelWait = WaitForSingleObject(sentinel.hProcess, 3000);
+                            receipt.unrelatedSentinelCleanupState = sentinelWait == WAIT_OBJECT_0 ? "RETAINED_HANDLE_TERMINATED" : "FAILED";
+                        } else {
+                            receipt.unrelatedSentinelCleanupState = "FAILED";
+                        }
+                    } else if (sentinelWait == WAIT_OBJECT_0) {
+                        receipt.unrelatedSentinelCleanupState = "NATURAL_EXIT";
+                    } else {
+                        receipt.unrelatedSentinelCleanupState = "FAILED";
+                    }
+                    receipt.unrelatedSentinelCleanupVerified = sentinelWait == WAIT_OBJECT_0;
+                    uint finalSentinelExit;
+                    if (GetExitCodeProcess(sentinel.hProcess, out finalSentinelExit)) {
+                        receipt.unrelatedSentinelExit = unchecked((int)finalSentinelExit);
+                    } else {
+                        receipt.unrelatedSentinelCleanupVerified = false;
+                        receipt.unrelatedSentinelCleanupState = "FAILED";
+                    }
+                }
+                CloseOwned(ref sentinel.hThread, ref closeOkay);
+                CloseOwned(ref sentinel.hProcess, ref closeOkay);
                 CloseOwned(ref inputRead, ref closeOkay);
                 CloseOwned(ref outputWrite, ref closeOkay);
                 if (job != IntPtr.Zero) { CloseOwned(ref job, ref closeOkay); }
@@ -623,7 +785,9 @@ namespace Munder.Research {
                      receipt.queryError != null || receipt.activeProcessesFinal != 0 ||
                      !receipt.pseudoConsoleClosed || !receipt.ioDrained ||
                      (scenario != "pty-io" && !receipt.descendantObserved) ||
-                     (scenario == "unrelated-sentinel" && !receipt.unrelatedSentinelSurvived)))
+                     (scenario == "unrelated-sentinel" &&
+                      (!receipt.unrelatedSentinelSurvived || !receipt.unrelatedSentinelCreated ||
+                       !receipt.unrelatedSentinelOutsideProofJob || !receipt.unrelatedSentinelCleanupVerified))))
                     receipt.result = "UNKNOWN";
             }
             return receipt;
@@ -637,10 +801,48 @@ if (-not (Test-WindowsPlatform)) {
     Write-Receipt -Receipt $receipt
     exit 1
 }
-if ($CompileOnly -and $Native) { throw 'CompileOnly and Native are mutually exclusive' }
+function Write-StageFailureReceipt {
+    param(
+        [Parameter(Mandatory)][ValidateSet('native-input-validation', 'embedded-csharp-compile', 'environment-preparation', 'native-entry-invocation', 'native-receipt-processing', 'durable-receipt-write')][string]$Stage,
+        [Parameter(Mandatory)][ValidateSet('ADMISSION', 'COMPILE', 'ENVIRONMENT', 'NATIVE_ENTRY', 'NATIVE_RECEIPT', 'DURABLE_RECEIPT')][string]$Category,
+        [System.Exception]$Exception = $null,
+        [bool]$NativeEntryAttempted = $false,
+        [bool]$NativeReceiptReturned = $false,
+        [bool]$NativeExecuted = $false,
+        [ValidateSet('NOT_RUN', 'PASS', 'FAIL', 'UNKNOWN')][string]$AdmissionResult = 'UNKNOWN',
+        [string[]]$AdmissionChecks = @()
+    )
+    $metadata = if ($null -ne $Exception) { Get-SafeErrorMetadata -Exception $Exception } else { [ordered]@{ hResult = $null; win32ErrorCode = $null } }
+    $receipt = New-Receipt -Result 'UNKNOWN' -CleanupState 'UNKNOWN' -NativeExecuted $NativeExecuted `
+        -NativeEntryAttempted $NativeEntryAttempted -NativeReceiptReturned $NativeReceiptReturned `
+        -NativeExecutionState (Get-NativeExecutionState -NativeEntryAttempted $NativeEntryAttempted -NativeReceiptReturned $NativeReceiptReturned) `
+        -OuterFailureStage $Stage -ErrorCategory $Category -ErrorHResult $metadata.hResult `
+        -Win32ErrorCode $metadata.win32ErrorCode -AdmissionResult $AdmissionResult -AdmissionChecks $AdmissionChecks
+    $receipt.failureStage = $Stage
+    Write-Receipt -Receipt $receipt
+    return $receipt
+}
+
+if ($CompileOnly -and $Native) {
+    Write-StageFailureReceipt -Stage 'native-input-validation' -Category 'ADMISSION' -AdmissionResult 'FAIL' | Out-Null
+    exit 1
+}
+if ($CompileOnly -and $AdmissionOnly) {
+    Write-StageFailureReceipt -Stage 'native-input-validation' -Category 'ADMISSION' -AdmissionResult 'FAIL' | Out-Null
+    exit 1
+}
+if ($Native -and $AdmissionOnly) {
+    Write-StageFailureReceipt -Stage 'native-input-validation' -Category 'ADMISSION' -AdmissionResult 'FAIL' | Out-Null
+    exit 1
+}
 
 if ($CompileOnly) {
-    $null = Add-Type -TypeDefinition $nativeSource -Language CSharp -ErrorAction Stop
+    try {
+        $null = Add-Type -TypeDefinition $nativeSource -Language CSharp -ErrorAction Stop
+    } catch {
+        Write-StageFailureReceipt -Stage 'embedded-csharp-compile' -Category 'COMPILE' -Exception $_.Exception | Out-Null
+        exit 1
+    }
     $receipt = New-Receipt -Result 'UNKNOWN' -CleanupState 'UNKNOWN' -FailureStage $null
     $receipt.nativeExecuted = $false
     $receipt.verification = 'PASS'
@@ -650,44 +852,125 @@ if ($CompileOnly) {
     exit 0
 }
 
-if (-not $Native) {
+if (-not $Native -and -not $AdmissionOnly) {
     $receipt = New-Receipt -Result 'UNKNOWN' -CleanupState 'UNKNOWN' -FailureStage 'native-mode-not-requested'
     $receipt.checks = @('contract-only default', 'no process creation', 'no ConPTY creation', 'no Job termination')
     Write-Receipt -Receipt $receipt
     exit 0
 }
 
-try {
-    $node = Assert-NativeInput
-    $null = Add-Type -TypeDefinition $nativeSource -Language CSharp -ErrorAction Stop
-    $root = [IO.Path]::GetFullPath($ProofRoot)
-    $environmentBlock = New-NativeEnvironmentBlock -NodePath $node -Root $root
-    $environmentPointer = [Runtime.InteropServices.Marshal]::StringToHGlobalUni($environmentBlock)
+if ($AdmissionOnly) {
     try {
-        $nativeReceipt = [Munder.Research.ConptyJobProofNative]::Run(
-            'munder-b1-conpty-job-ownership', $Scenario, $node, $fixturePath, $root, $environmentPointer)
-        $receipt = New-Receipt -Result ([string]$nativeReceipt.result) -CleanupState ([string]$nativeReceipt.cleanupState) -NativeExecuted $true -Native $nativeReceipt
-        $receipt.checks = @(
-            'private unnamed Job', 'KILL_ON_JOB_CLOSE', 'ConPTY pipes and HPCON',
-            'STARTUPINFOEX PSEUDOCONSOLE plus JOB_LIST', 'direct CreateProcessW',
-            'root membership and ActiveProcesses queries', 'bounded TerminateJobObject stop',
-            'separate pseudoConsoleClosed and ioDrained observations')
-        $receiptPath = [IO.Path]::Combine($root, 'proof-receipt.json')
-        try {
-            Write-Receipt -Receipt $receipt -DurablePath $receiptPath
-        } catch {
-            $receipt.result = 'UNKNOWN'
-            $receipt.cleanupState = 'UNKNOWN'
-            $receipt.failureStage = 'durable-receipt-write-failed'
-            Write-Receipt -Receipt $receipt
-            exit 1
-        }
-        exit $(if ($receipt.result -eq 'PASS') { 0 } else { 1 })
-    } finally {
-        [Runtime.InteropServices.Marshal]::FreeHGlobal($environmentPointer)
+        $node = Assert-FixedInputs
+        $root = Assert-AdmissionRoot
+    } catch {
+        Write-StageFailureReceipt -Stage 'native-input-validation' -Category 'ADMISSION' -Exception $_.Exception -AdmissionResult 'FAIL' | Out-Null
+        exit 1
     }
+    try {
+        $null = Add-Type -TypeDefinition $nativeSource -Language CSharp -ErrorAction Stop
+    } catch {
+        Write-StageFailureReceipt -Stage 'embedded-csharp-compile' -Category 'COMPILE' -Exception $_.Exception -AdmissionResult 'UNKNOWN' | Out-Null
+        exit 1
+    }
+    try {
+        $environmentBlock = New-NativeEnvironmentBlock -NodePath $node -Root $root
+        Assert-BoundedEnvironmentBlock -EnvironmentBlock $environmentBlock -Root $root -NodePath $node | Out-Null
+    } catch {
+        Write-StageFailureReceipt -Stage 'environment-preparation' -Category 'ENVIRONMENT' -Exception $_.Exception -AdmissionResult 'FAIL' | Out-Null
+        exit 1
+    }
+    $receipt = New-Receipt -Result 'UNKNOWN' -CleanupState 'UNKNOWN' -FailureStage $null `
+        -AdmissionResult 'PASS' -AdmissionChecks @('fixed absolute node and fixture', 'embedded C# compiled', 'bounded environment prepared')
+    $receipt.verification = 'PASS'
+    $receipt.checks = @('AdmissionOnly', 'no native entry invoked', 'no Job/ConPTY/process creation')
+    $receipt.failureStage = $null
+    Write-Receipt -Receipt $receipt
+    exit 0
+}
+
+try {
+    $node = Assert-FixedInputs
+    $root = Assert-ProofRoot
 } catch {
-    $receipt = New-Receipt -Result 'UNKNOWN' -CleanupState 'UNKNOWN' -NativeExecuted $false -FailureStage 'native-admission-or-compile-failed'
+    Write-StageFailureReceipt -Stage 'native-input-validation' -Category 'ADMISSION' -Exception $_.Exception -AdmissionResult 'FAIL' | Out-Null
+    exit 1
+}
+
+try {
+    $null = Add-Type -TypeDefinition $nativeSource -Language CSharp -ErrorAction Stop
+} catch {
+    Write-StageFailureReceipt -Stage 'embedded-csharp-compile' -Category 'COMPILE' -Exception $_.Exception | Out-Null
+    exit 1
+}
+
+$environmentPointer = [IntPtr]::Zero
+try {
+    $environmentBlock = New-NativeEnvironmentBlock -NodePath $node -Root $root
+    Assert-BoundedEnvironmentBlock -EnvironmentBlock $environmentBlock -Root $root -NodePath $node | Out-Null
+    $environmentPointer = [Runtime.InteropServices.Marshal]::StringToHGlobalUni($environmentBlock)
+} catch {
+    Write-StageFailureReceipt -Stage 'environment-preparation' -Category 'ENVIRONMENT' -Exception $_.Exception | Out-Null
+    exit 1
+}
+
+$nativeEntryAttempted = $true
+$nativeReceipt = $null
+$nativeReceiptReturned = $false
+try {
+    $nativeReceipt = [Munder.Research.ConptyJobProofNative]::Run(
+        'munder-b1-conpty-job-ownership', $Scenario, $node, $fixturePath, $root, $environmentPointer)
+    $nativeReceiptReturned = $null -ne $nativeReceipt
+} catch {
+    if ($environmentPointer -ne [IntPtr]::Zero) { [Runtime.InteropServices.Marshal]::FreeHGlobal($environmentPointer) }
+    Write-StageFailureReceipt -Stage 'native-entry-invocation' -Category 'NATIVE_ENTRY' -Exception $_.Exception `
+        -NativeEntryAttempted $nativeEntryAttempted -NativeReceiptReturned $nativeReceiptReturned | Out-Null
+    exit 1
+}
+if ($environmentPointer -ne [IntPtr]::Zero) { [Runtime.InteropServices.Marshal]::FreeHGlobal($environmentPointer) }
+
+try {
+    if ($null -eq $nativeReceipt -or $nativeReceipt.GetType().FullName -ne 'Munder.Research.ConptyJobProofReceipt') {
+        throw [InvalidOperationException]::new('Native receipt object was not returned')
+    }
+    if ([string]$nativeReceipt.result -notin @('PASS', 'FAIL', 'UNKNOWN') -or
+        [string]$nativeReceipt.cleanupState -notin @('VERIFIED_EMPTY', 'FAILED', 'UNKNOWN')) {
+        throw [InvalidOperationException]::new('Native receipt schema state was invalid')
+    }
+    $receipt = New-Receipt -Result ([string]$nativeReceipt.result) -CleanupState ([string]$nativeReceipt.cleanupState) `
+        -NativeExecuted $true -Native $nativeReceipt -NativeEntryAttempted $nativeEntryAttempted `
+        -NativeReceiptReturned $nativeReceiptReturned -NativeExecutionState (Get-NativeExecutionState `
+            -NativeEntryAttempted $nativeEntryAttempted -NativeReceiptReturned $nativeReceiptReturned)
+    $receipt.checks = @(
+        'private unnamed Job', 'KILL_ON_JOB_CLOSE', 'ConPTY pipes and HPCON',
+        'STARTUPINFOEX PSEUDOCONSOLE plus JOB_LIST', 'direct CreateProcessW',
+        'root membership and ActiveProcesses queries', 'bounded TerminateJobObject stop',
+        'separate pseudoConsoleClosed and ioDrained observations',
+        'independent retained-handle sentinel outside proof Job'
+    )
+} catch {
+    Write-StageFailureReceipt -Stage 'native-receipt-processing' -Category 'NATIVE_RECEIPT' -Exception $_.Exception `
+        -NativeEntryAttempted $nativeEntryAttempted -NativeReceiptReturned $nativeReceiptReturned `
+        -AdmissionResult 'NOT_RUN' | Out-Null
+    exit 1
+}
+
+$receiptPath = [IO.Path]::Combine($root, 'proof-receipt.json')
+try {
+    Write-Receipt -Receipt $receipt -DurablePath $receiptPath
+} catch {
+    $metadata = Get-SafeErrorMetadata -Exception $_.Exception
+    $receipt.result = 'UNKNOWN'
+    $receipt.cleanupState = 'UNKNOWN'
+    $receipt.outerFailureStage = 'durable-receipt-write'
+    $receipt.errorCategory = 'DURABLE_RECEIPT'
+    $receipt.errorHResult = $metadata.hResult
+    $receipt.win32ErrorCode = $metadata.win32ErrorCode
+    $receipt.failureStage = 'durable-receipt-write'
+    $receipt.nativeExecutionState = 'EXECUTED_WITH_RECEIPT'
+    $receipt.nativeEntryAttempted = $true
+    $receipt.nativeReceiptReturned = $true
     Write-Receipt -Receipt $receipt
     exit 1
 }
+exit $(if ($receipt.result -eq 'PASS') { 0 } else { 1 })

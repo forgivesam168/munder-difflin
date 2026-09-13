@@ -29,12 +29,23 @@ function safePowerShellEnvironment() {
     .filter(([, value]) => typeof value === 'string' && value.length > 0));
 }
 
-function runPowerShell(args) {
+function fixedNodeExecutable() {
+  const executable = path.resolve(process.execPath);
+  assert.equal(path.basename(executable).toLowerCase(), 'node.exe');
+  return executable;
+}
+
+function admissionRootForTest() {
+  const suffix = `A${process.pid.toString(36).toUpperCase().padStart(5, '0').slice(-5)}`;
+  return path.join(root, '.tmp', `conpty-admission-${suffix}`);
+}
+
+function runPowerShell(args, environmentOverrides = {}) {
   const executable = findPowerShell();
   if (!executable) return { skipped: true };
   const result = spawnSync(executable, ['-NoProfile', '-NonInteractive', '-File', scriptPath, ...args], {
     cwd: root,
-    env: safePowerShellEnvironment(),
+    env: { ...safePowerShellEnvironment(), ...environmentOverrides },
     encoding: 'utf8',
     windowsHide: true,
     timeout: 30000
@@ -86,6 +97,24 @@ test('harness has no post-creation membership fallback, PID discovery, or shell 
   assert.match(source, /FixedCommand\(executable, fixture, scenario\)/);
 });
 
+test('outer failure stages and execution-state semantics are explicit', () => {
+  for (const stage of [
+    'native-input-validation', 'embedded-csharp-compile', 'environment-preparation',
+    'native-entry-invocation', 'native-receipt-processing', 'durable-receipt-write'
+  ]) assert.match(source, new RegExp(stage));
+  for (const field of [
+    'nativeEntryAttempted', 'nativeReceiptReturned', 'nativeExecutionState',
+    'outerFailureStage', 'errorCategory', 'errorHResult', 'win32ErrorCode'
+  ]) assert.match(source, new RegExp(field));
+  for (const state of ['NOT_ATTEMPTED', 'ATTEMPTED_NO_RECEIPT', 'EXECUTED_WITH_RECEIPT']) {
+    assert.match(source, new RegExp(state));
+  }
+  assert.match(source, /\$nativeReceiptReturned = \$null -ne \$nativeReceipt/);
+  assert.match(source, /-NativeReceiptReturned \$nativeReceiptReturned/);
+  assert.doesNotMatch(source, /native-admission-or-compile-failed/);
+  assert.doesNotMatch(source, /error\.Message/);
+});
+
 test('harness does not inherit the host environment or access network/credentials', () => {
   assert.doesNotMatch(source, /GetEnvironmentVariables\s*\(/);
   assert.doesNotMatch(source, /process\.env/);
@@ -124,6 +153,13 @@ test('receipt schema and terminal semantics are explicit', () => {
   assert.match(source, /workerTreeClaim = 'synthetic root and its descendants only'/);
   assert.match(source, /pseudoConsoleHostIncluded = \$false/);
   assert.match(source, /unrelatedSentinelSurvived/);
+  assert.match(source, /unrelatedSentinelCreated/);
+  assert.match(source, /unrelatedSentinelOutsideProofJob/);
+  assert.match(source, /unrelatedSentinelCleanupVerified/);
+  assert.match(source, /CreateFixedSentinel/);
+  assert.match(source, /IsProcessInJob\(sentinel\.hProcess, job/);
+  assert.match(source, /TerminateProcess\(sentinel\.hProcess/);
+  assert.doesNotMatch(source, /GetCurrentProcess/);
 });
 
 test('all bounded proof cases are represented without enabling retry/recovery/takeover', () => {
@@ -131,6 +167,7 @@ test('all bounded proof cases are represented without enabling retry/recovery/ta
     'normal-descendant', 'root-early-exit', 'bounded-stop', 'timeout',
     'query-failure', 'helper-failure', 'receipt-failure', 'unrelated-sentinel', 'pty-io'
   ]) assert.match(source, new RegExp(scenario.replace('-', '\\-')));
+  assert.match(fixture, /'--sentinel'/);
   assert.doesNotMatch(source, /retry|recovery|takeover/i);
   assert.match(source, /forcedStop/);
 });
@@ -145,6 +182,9 @@ test('default path is non-native and does not write a durable receipt', { skip: 
   assert.equal(receipt.pseudoConsoleClosed, false);
   assert.equal(receipt.result, 'UNKNOWN');
   assert.equal(receipt.cleanupState, 'UNKNOWN');
+  assert.equal(receipt.nativeEntryAttempted, false);
+  assert.equal(receipt.nativeReceiptReturned, false);
+  assert.equal(receipt.nativeExecutionState, 'NOT_ATTEMPTED');
   assert.equal(fs.existsSync(path.join(root, '.tmp', 'conpty-job-proof-receipt.json')), false);
 });
 
@@ -158,6 +198,80 @@ test('compile-only path compiles native declarations but never executes proof mo
   assert.equal(receipt.verification, 'PASS');
   assert.equal(receipt.result, 'UNKNOWN');
   assert.deepEqual(receipt.checks, ['PowerShell parsed', 'embedded C# compiled', 'native entry not invoked']);
+  assert.equal(receipt.nativeEntryAttempted, false);
+  assert.equal(receipt.nativeReceiptReturned, false);
+  assert.equal(receipt.nativeExecutionState, 'NOT_ATTEMPTED');
+});
+
+test('AdmissionOnly passes fixed input, compile, and environment without native entry', { skip: process.platform !== 'win32' }, () => {
+  const admissionRoot = admissionRootForTest();
+  assert.equal(fs.existsSync(admissionRoot), false);
+  try {
+    const result = runPowerShell([
+      '-AdmissionOnly', '-NodeExecutable', fixedNodeExecutable(), '-AdmissionRoot', admissionRoot
+    ]);
+    if (result.skipped) return;
+    const receipt = receiptFrom(result);
+    assert.equal(result.status, 0, result.stderr);
+    assert.equal(receipt.admissionResult, 'PASS');
+    assert.deepEqual(receipt.admissionChecks, [
+      'fixed absolute node and fixture', 'embedded C# compiled', 'bounded environment prepared'
+    ]);
+    assert.equal(receipt.nativeEntryAttempted, false);
+    assert.equal(receipt.nativeReceiptReturned, false);
+    assert.equal(receipt.nativeExecutionState, 'NOT_ATTEMPTED');
+    assert.equal(receipt.nativeExecuted, false);
+    assert.equal(receipt.verification, 'PASS');
+    assert.equal(receipt.result, 'UNKNOWN');
+    assert.equal(receipt.outerFailureStage, null);
+    assert.equal(fs.existsSync(path.join(admissionRoot, 'proof-receipt.json')), false);
+  } finally {
+    if (fs.existsSync(admissionRoot)) fs.rmSync(admissionRoot, { recursive: true, force: false });
+  }
+});
+
+test('AdmissionOnly invalid input fails before native entry with a specific stage', { skip: process.platform !== 'win32' }, () => {
+  const admissionRoot = admissionRootForTest();
+  const invalidNode = path.join(root, '.tmp', 'not-a-node.exe');
+  assert.equal(fs.existsSync(admissionRoot), false);
+  try {
+    const result = runPowerShell([
+      '-AdmissionOnly', '-NodeExecutable', invalidNode, '-AdmissionRoot', admissionRoot
+    ]);
+    if (result.skipped) return;
+    const receipt = receiptFrom(result);
+    assert.equal(result.status, 1);
+    assert.equal(receipt.admissionResult, 'FAIL');
+    assert.equal(receipt.outerFailureStage, 'native-input-validation');
+    assert.equal(receipt.errorCategory, 'ADMISSION');
+    assert.equal(receipt.nativeEntryAttempted, false);
+    assert.equal(receipt.nativeReceiptReturned, false);
+    assert.equal(receipt.nativeExecutionState, 'NOT_ATTEMPTED');
+    assert.equal(receipt.nativeExecuted, false);
+  } finally {
+    if (fs.existsSync(admissionRoot)) fs.rmSync(admissionRoot, { recursive: true, force: false });
+  }
+});
+
+test('AdmissionOnly environment failure is distinguished from input failure', { skip: process.platform !== 'win32' }, () => {
+  const admissionRoot = admissionRootForTest();
+  assert.equal(fs.existsSync(admissionRoot), false);
+  try {
+    const result = runPowerShell([
+      '-AdmissionOnly', '-NodeExecutable', fixedNodeExecutable(), '-AdmissionRoot', admissionRoot
+    ], { ComSpec: path.join(root, '.tmp', 'missing-comspec.exe') });
+    if (result.skipped) return;
+    const receipt = receiptFrom(result);
+    assert.equal(result.status, 1);
+    assert.equal(receipt.admissionResult, 'FAIL');
+    assert.equal(receipt.outerFailureStage, 'environment-preparation');
+    assert.equal(receipt.errorCategory, 'ENVIRONMENT');
+    assert.equal(receipt.nativeEntryAttempted, false);
+    assert.equal(receipt.nativeReceiptReturned, false);
+    assert.equal(receipt.nativeExecutionState, 'NOT_ATTEMPTED');
+  } finally {
+    if (fs.existsSync(admissionRoot)) fs.rmSync(admissionRoot, { recursive: true, force: false });
+  }
 });
 
 test('native mode is never selected by the test harness', () => {

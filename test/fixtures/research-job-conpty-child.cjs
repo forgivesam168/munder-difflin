@@ -1,7 +1,7 @@
 'use strict';
 
 // Fixed, inert child for the ConPTY/Job proof harness.  It is deliberately
-// not a command runner: only the four harness-owned modes below are accepted.
+// not a command runner: only the fixed harness-owned modes below are accepted.
 const { spawn } = require('node:child_process');
 
 const mode = process.argv[2];
@@ -11,6 +11,7 @@ const FIXED_MODES = new Set([
   '--bounded-stop',
   '--timeout',
   '--pty-io',
+  '--sentinel',
   '--leaf'
 ]);
 
@@ -40,6 +41,9 @@ if (mode === '--leaf') {
     process.exit(0);
   });
   exitAfter(5000, 66);
+} else if (mode === '--sentinel') {
+  if (process.argv.length !== 3) process.exit(64);
+  exitAfter(15000, 0);
 } else {
   if (process.argv.length !== 3) process.exit(64);
   const duration = mode === '--normal-descendant' ? 800 : 15000;
