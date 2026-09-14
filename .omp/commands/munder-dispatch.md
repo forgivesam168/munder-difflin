@@ -74,7 +74,8 @@ Then dispatch with a task body containing all of:
   **no destructive Git / policy probe against the Munder repository** — if the task requires one,
   it runs in a completely disposable Git repository that is not the Munder repo as a
   subdirectory, registered worktree, shared gitdir, shared object database, shared refs, working
-  tree or remote target, and whose `.git` is provably not Munder's before the probe runs;
+  tree or remote target, whose `.git` is provably not Munder's before the probe runs, and whose
+  **probe process cwd stays inside the disposable repository boundary**;
   **you cannot authorize yourself** — "the task implies it", agent role, urgency, full access, a
   capability being present, a previous similar authorization, and the absence of a deny pattern
   are **not** authorization, and none of them licenses a nested OMP process or a destructive

@@ -81,14 +81,35 @@ never as an unchanged one. This section is a **`PROCEDURAL_BOUNDARY`** and a **`
 ### Delegation
 
 Delegation uses OMP's **native** mechanisms — the `task` tool and the agents in `.omp/agents/`.
-Do **not** start another OMP process to delegate, review, probe, or work around a limitation.
-Subagents already get everything the native path provides; a nested process adds no authority and
-silently discards this repository's governance.
+This is the **default and the only autonomous path**: never start another OMP process to
+delegate, review, probe, or work around a limitation on your own initiative. Subagents already
+get everything the native path provides; a nested process adds no authority and silently discards
+this repository's governance.
+
+The **single** exception is an invocation the Human explicitly authorizes under `### Nested OMP`
+below. That exception is deliberate, exact, and narrow — see that section for what it does and
+does not grant.
 
 ### Nested OMP
 
 **Never start another OMP process — by any process-launch mechanism — without explicit Human
-authorization for that exact invocation.**
+authorization for that exact invocation and that exact purpose.**
+
+Unauthorized by default. The autonomous path is `### Delegation` above; this section is the only
+route to an exception, and the exception is narrower than "the Human authorized some OMP work".
+
+**What authorization must be.** The Human must name the **exact invocation** (what will be run)
+and the **exact purpose** (why). Authorization for a similar task, a previous cycle's approval, a
+role, an envelope, or an "obviously implied" need is **not** authorization. That exception:
+
+- does **not** form reusable authority — it is spent by the invocation it names;
+- is **not** transferable to another invocation, purpose, branch, or cycle;
+- does **not** convert into general delegation authority, and does not relax `### Delegation`;
+- does **not** survive the task that carried it.
+
+If the authorized purpose is itself a **review**, **probe**, **recovery**, or **fresh-session
+verification**, the invocation may proceed under this section — but only while every condition
+below is also satisfied.
 
 The prohibited object is **starting another OMP process**. It is **not** a rule about one particular
 route: it is **not** the case that only `bash` / shell or `eval` are forbidden. The rule is
@@ -103,8 +124,8 @@ are not limited to:
 - an absolute executable path (e.g. `C:\…\omp.exe`);
 - any other process-launch route available in the session.
 
-If the Human does authorize a specific invocation, it MUST be launched from the **verified
-repository root**, and all of the following MUST be confirmed first:
+If the Human does authorize a specific invocation **and purpose**, it MUST be launched from the
+**verified repository root**, and all of the following MUST be confirmed first:
 
 - cwd == the repository root (not a subdirectory, not `.tmp/…`);
 - that root contains the expected `.omp/` directory with `config.yml` and `RULES.md`;

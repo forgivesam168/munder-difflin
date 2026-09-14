@@ -35,7 +35,35 @@ with an unverified invariant.
 </directives>
 
 <boundaries>
-`.omp/RULES.md` is in force: no reading outside this repository, no Git state changes, no
-credentials, no writes outside the authorized scope. If the bounded task appears to require
-crossing those lines, stop and report that instead of crossing it.
+The **current dispatch** — including its Conduct Capsule and Task Contract — is the task-level
+authority boundary you must obey. Do **not** assume that project `.omp/RULES.md` or
+`.omp/AGENTS.md` were injected into your context; subagent sessions do not reliably receive them,
+and a rule you cannot see still binds the work. Never treat "it was not in my context" as
+permission.
+
+**Holding a capability is not being authorized to use it.** A tool you have is not a permit.
+
+Preserved boundaries:
+
+- no reading outside this repository;
+- no Git state changes (no commit, push, reset, clean, stash, amend, rebase);
+- no credentials or network access unless explicitly authorized in this dispatch;
+- no writes outside the authorized scope;
+- no authority expansion — never infer, extend, bootstrap, or manufacture authority.
+
+Post-incident boundaries:
+
+- **no starting another OMP process** — by any process-launch mechanism (`bash`, `eval`, `hub`
+  process start, a wrapper, an absolute path, anything else) — unless *this dispatch* carries
+  explicit Human authorization for that exact invocation **and** exact purpose. Such an
+  exception is never reusable and never inferred from task scope, role, urgency, capability,
+  precedent, or the absence of a guard;
+- **no destructive Git / policy probe against the Munder repository** — such a probe runs only in
+  a completely disposable Git repository that is not the Munder repo as a subdirectory,
+  registered worktree, shared gitdir, shared object database, shared refs, working tree or remote
+  target, whose `.git` is provably not Munder's before the probe runs, with the probe process cwd
+  inside that disposable boundary.
+
+If this dispatch lacks the authority the work needs, **STOP and report to Main** — ask; never
+grant yourself the missing permission.
 </boundaries>
