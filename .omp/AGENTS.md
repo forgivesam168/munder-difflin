@@ -188,10 +188,31 @@ Be honest about this rather than trusting the harness further than it goes:
 - `bash.patterns` is an **approval policy, not containment**. It matches literal text plus `*` on a
   tokenised command segment, so forms like `git -C x push`, an absolute `git.exe` path, a
   variable-built command, or a shell builtin wrapper are not covered. It governs the `bash` tool
-  only, not `eval`. The `.omp/config.yml` list is a *floor* on the destructive Git operations, not
-  a complete gate — the rest of the authority boundary is `.omp/RULES.md` plus the task envelope.
+  only, not `eval`, and not process launches routed through `hub`. The `.omp/config.yml` list is
+  the **nine destructive Git operations** and nothing else — a *floor*, not a complete gate. The
+  rest of the authority boundary — including nested-`omp` prohibition and destructive-probe
+  isolation, which are **`PROCEDURAL_BOUNDARY` / `KNOWN_LIMITATION`, not mechanically enforced** —
+  is `.omp/RULES.md` (see its Incident safety boundary section) plus the task envelope.
 - OMP has **no per-path read/write ACL**. "Do not read outside this repository" is enforced by
-  `.omp/RULES.md` (sticky, always in context), not by the tool layer.
+  `.omp/RULES.md` (sticky for the Main session), not by the tool layer. Sticky applies to the
+  session that loads the file; it is **not** a guarantee that a subagent receives it.
+- **Project settings discovery is cwd-scoped and does NOT walk up to an ancestor `.omp/`.**
+  VERIFIED by incident (2026-09-14): a fresh `omp -p` process launched with its cwd inside
+  `.tmp/git-authority-policy-2026-09-14/` resolved `bash.patterns` to `[]`, so **no project hard
+  deny applied** and a destructive Git probe acted on the real working tree. The same command
+  from the repository root resolves the full nine-pattern list. Subagents inherit these settings
+  because their session is created from the repository-root session — but a **separate process
+  started from a subdirectory does not**.
+- **Scope that finding precisely: it is about project SETTINGS, not about every `.omp` artifact.**
+  Project **settings** discovery (`.omp/config.yml`, hence `bash.patterns`) and project
+  **context / rules** discovery (`RULES.md`, `AGENTS.md`) are **different mechanisms**. The
+  incident proves the settings path; it does **not** license the claim that `.omp` governance in
+  general fails to ancestor-walk. Do not generalise one into the other in either direction.
+- **Verify that effective policy actually loaded.** File existence is not policy presence.
+  **Declared boundary != enforced boundary**: an unloaded project policy is indistinguishable
+  from no policy, and `.omp` policy remains **cwd-scoped Harness policy, not OS/process
+  containment**. See `.omp/RULES.md` § Incident safety boundary for the required cwd/root and
+  read-back verification.
 - A read-only agent is read-only because its `tools` list omits `edit`/`write`. An agent holding
   `bash` can still mutate files through the shell. `risk-reviewer` is genuinely read-only *because
   it has no `bash`*; treat any agent that has one as a policy obligation, not a barrier.

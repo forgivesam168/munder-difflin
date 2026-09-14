@@ -7,6 +7,21 @@ evidence stay bounded and so the result can be reconciled without replaying cont
 
 TASK: $ARGUMENTS
 
+**Delegation is native only.** Dispatch through the `task` tool with the agent definitions in
+`.omp/agents/`. Do NOT start another OMP process — **by any process-launch mechanism** (`bash`,
+`eval`, `hub` process start, a wrapper, an absolute executable path, anything else) — to delegate,
+review, probe, or work around a limitation. The prohibition is route-agnostic: the prohibited
+object is starting another OMP process, not one particular route to it. A nested process can run
+with **no project settings policy in force** (project settings discovery is cwd-scoped and does
+not walk up to an ancestor `.omp/`), so nothing this repository declares may be assumed present.
+See `.omp/RULES.md` § Incident safety boundary.
+
+**You cannot authorize yourself.** "Human authorization" means an explicit instruction from the
+Human in the current conversation, or an envelope the Human explicitly granted for the current
+program/task. It is never inferred from task scope, agent role, goal urgency, full access, a
+capability being available, a previous similar authorization, or the absence of a deny pattern.
+Without it: STOP and ask.
+
 Before dispatching, decide and state:
 
 1. **Research gap?** Is any unresolved fact needed (upstream behaviour, an API contract, how the
@@ -23,6 +38,19 @@ Before dispatching, decide and state:
 4. **Authority tier.** Is anything here **hard deny** (cannot be authorized at runtime — the
    pattern must be changed in `.omp/config.yml` with Human approval), or **Human-gated but
    allowed once explicitly authorized**? Name it, and stop there rather than assuming the answer.
+5. **Probe isolation.** Does this task exercise Git deny policy, destructive Git behaviour,
+   `reset` / `clean` / `restore` / `amend`, force push, ref mutation, or matcher coverage? If yes,
+   the probe MUST run against a **completely disposable** Git repository, never the Munder
+   repository — and it must not be the Munder repository in any of these senses: not a
+   **subdirectory** of it, not a **registered worktree**, not sharing a **linked/common gitdir**,
+   not sharing an **object database** (no `alternates`), not sharing **refs**, not the Munder
+   **working tree**, with a **remote/push URL that does not point at the Munder repo or a path
+   inside it**, and with the probe's **cwd inside the disposable boundary**. The proof must
+   demonstrate the scratch `.git` is not Munder's **before** any mutation-capable probe runs.
+   `--dry-run`, a URL rewrite, a `.tmp` cwd, or trusting the deny list to stop it are **not**
+   sufficient — the deny list is a floor, not containment, and a probe failure must not be able
+   to mutate Munder's refs, objects, index, working tree, or remote. See `.omp/RULES.md` §
+   Incident safety boundary.
 
 Then dispatch with a task body containing all of:
 
@@ -40,8 +68,19 @@ Then dispatch with a task body containing all of:
   task-specific stop conditions — **not** the whole of `.omp/AGENTS.md` or `.omp/RULES.md`.
   Whenever the work touches code, evidence or a report, include: no reading outside this
   repository; no Git state change, no commit, push, reset, clean or stash; no writes outside the
-  authorized scope; never convert `UNKNOWN` to `PASS`; `NOT_RUN` is never `PASS`; a negative
-  result is a valid outcome; never weaken a test to manufacture green.
+  authorized scope; **no starting another OMP process by any process-launch mechanism** —
+  `bash`, `eval`, `hub` process start, a wrapper, an absolute executable path, or anything else;
+  the prohibition is route-agnostic and covers every available route, not just shell/`eval`;
+  **no destructive Git / policy probe against the Munder repository** — if the task requires one,
+  it runs in a completely disposable Git repository that is not the Munder repo as a
+  subdirectory, registered worktree, shared gitdir, shared object database, shared refs, working
+  tree or remote target, and whose `.git` is provably not Munder's before the probe runs;
+  **you cannot authorize yourself** — "the task implies it", agent role, urgency, full access, a
+  capability being present, a previous similar authorization, and the absence of a deny pattern
+  are **not** authorization, and none of them licenses a nested OMP process or a destructive
+  probe; without explicit Human authorization, STOP and ask; never convert `UNKNOWN` to `PASS`;
+  `NOT_RUN` is never `PASS`; a negative result is a valid outcome; never weaken a test to
+  manufacture green.
   Do **not** treat a custom agent's `autoloadSkills` as a substitute for this capsule: whether that
   skill reliably reaches a subagent is currently `UNKNOWN` (see `.omp/AGENTS.md`). Send the capsule
   for every agent, custom or bundled.
