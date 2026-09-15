@@ -62,7 +62,7 @@ comes from the context files it loads (this file, `.omp/RULES.md`) and the setti
 | Routine bounded implementation | `task` | General worker, full tools. |
 | Escalated implementation | `deep-worker` | For runtime lifecycle, cross-module integration, architecture, or evidence-conflict work. |
 | Independent review of a change | `reviewer` | Separate from the developer. Always worth one pass on a bounded change. |
-| Second, independent risk review | `risk-reviewer` | Only for the high-risk classes listed in `.omp/RULES.md`. Different model expected (`@risk`), but that family separation is `INFERENCE`, not verified. |
+| Second, independent risk review | `risk-reviewer` | Only for the high-risk classes listed in `.omp/RULES.md`. Read-only by construction (no `bash`). |
 | Security-sensitive discovery | `security-reviewer` | Vulnerability-shaped scope only; not a general risk review. |
 
 Dispatch discipline:

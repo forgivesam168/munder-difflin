@@ -27,9 +27,16 @@ modelRoles:
   # model". `default` is intentionally absent so Main stays the Human's selection.
   smol: cliproxyapi/deepseek-v4.1-flash:low  # PROVISIONAL — reconnaissance, scout, tiny background work
   task: cliproxyapi/gpt-5.6-luna:medium      # PROVISIONAL — routine bounded implementation
-  slow: cliproxyapi/deepseek-v4-pro:high     # PROVISIONAL — first independent review
-  risk: cliproxyapi/kimi-k2.7-code:high      # PROVISIONAL — second review; family separation is INFERENCE
+  slow: cliproxyapi/kimi-k2.7-code:high      # PROVISIONAL — first review (`reviewer`)
+  risk: cliproxyapi/gpt-5.6-sol:high         # PROVISIONAL — second risk review; same model as `deep`
   deep: cliproxyapi/gpt-5.6-sol:high         # PROVISIONAL — escalated implementation
+  #
+  # 2026-09-15: `slow` now carries the model that `risk` previously carried, and `risk` now
+  # carries `deep`'s; `deep` is unchanged and the former `slow` model (deepseek-v4-pro) is no
+  # longer used by any role. Purpose: `reviewer` takes `@slow`, so the first reviewer no longer
+  # runs in the same family as Main. That is model-selector separation only — every role mapped
+  # in this file is on the single `cliproxyapi` provider — and it is a mapping, not a runtime
+  # guarantee. Read the session's `model_change` record to see what a given run actually used.
 
 task:
   # Main -> exactly one delegation level. Children get no `task` tool, so subagents cannot
