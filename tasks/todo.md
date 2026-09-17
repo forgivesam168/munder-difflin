@@ -29,6 +29,149 @@
 - 原始 31 success criteria 完全不變；A/B/C/H/R 只是 execution roadmap。
 - 下一 phase：B — real Codex worker：start / supervision / result acceptance / stop。
 
+# 2026-09-17 PRE-B/C DURABLE HANDOFF — fresh Main 接手入口（本節為最新狀態）
+
+本節取代 2026-09-13 A closure 成為**當前接手入口**；下方 A1/001–007 歷史證據全部保留、不改寫。
+本節只記錄已由 Main 一手核對的 artifact 事實；未經核對者標 `UNKNOWN`。
+
+## Fresh Main 必須先知道的事
+
+- **current HEAD** = `2bbaf058a5141b70c43efb17e7b0f676e1774b28`，branch `research/electron-security-poc`。
+- **live remote checkpoint** = `47a63075bd7e05a6ff6c4d38f8b16db949aee9f9`（`origin/research/electron-security-poc`，由 Human 外部確認）。
+- **local-only commits（未 push；本地領先 remote 3 個 commit）**：
+  - `a0002cd1` fix: reconcile OMP governance boundaries
+  - `bf1e37a9` fix: retarget reviewer model roles for independent review
+  - `2bbaf058` fix: clarify OMP authority envelope semantics
+- 完整鏈：`47a63075` → `a0002cd1` → `bf1e37a9` → `2bbaf058`（HEAD）。已 push 者僅到 `47a63075`。
+- **index 空**；**compatibility dirty cohort 必須保留原樣、不得 stage/format/restore**：
+  `src/shared/codexRemote.ts`、`test/{agent-token-cap,cli-install-ladder,codex-remote,transcript-project-dir}.test.cjs` —
+  5 files / 46 insertions / 20 deletions，5/5 SHA256 已記錄。
+- 26 個 untracked path-set（`.codex/`、`tasks/*.json` 歷史證據、`tasks/lessons.md`、`tools/research-test.cjs`）保留。
+
+## A 狀態
+
+- `CLOSED_ENOUGH_TO_ENTER_B`；A1 FINAL CLOSURE = PASS 且 feature scope FROZEN。
+- A1 native acceptance obligation COMPLETE（native-007）；**不建立 008**。
+- A closure 不代表 company readiness，也不代表 real Codex worker 已可執行。
+
+## B 狀態 — source/contract 已落地，runtime 未接線、native 未執行
+
+**VERIFIED：B1 bounded contract 已存在（`de03d3f5` feat: add bounded Codex worker contract）**
+
+- `src/main/codexWorkerContract.ts` — contract / admission / result validation（純函式；檔頭自述
+  `B1 contract/admission only. No filesystem, process, Electron, credential, or network API belongs in this module.`）
+- `src/main/workerLaunch.ts` — `buildCodexWorkerLaunch`：固定 argv `['-a','never','-s','workspace-write']`、`shell: false`
+- `src/main/ptyEnv.ts` — `buildCodexWorkerEnv` / `validateCodexWorkerEnv`：不吃 parent env，只走 9-key allowlist
+  （`PATH, HOME, USERPROFILE, TEMP, TMP, CODEX_HOME, TERM, COLORTERM, FORCE_COLOR`）
+
+**10 項 admission gates**（`ADMISSION_GATE_NAMES`）逐項對應 A closure 所列 B blocker：
+`executableIdentity`、`taskIdentity`、`sourceIdentity`、`rootPolicy`、`environmentPolicy`、
+`credentialPolicy`、`networkPolicy`、`processOwnership`、`resultPolicy`、`authority`。
+
+**目前 admission default = `BLOCKED`、`runtimeReady: false`**：未提供 evidence 時
+`evaluateCodexAdmission(contract)` 逐 gate 回 `BLOCKED`/`UNKNOWN`，整體為 `BLOCKED`。
+`authority` gate 明列 `runtimePermit` 需 `PRESENT` 且 source/identity/Human approval 全數成立。
+
+**production wiring：NOT DONE / CLOSED（VERIFIED）**
+
+- `buildCodexWorkerEnv`、`buildCodexWorkerLaunch`、`evaluateCodexAdmission`、`validateTaskResult`、
+  `classifyTerminal` 在 `src/` **零生產呼叫點**（僅自身檔案內定義與測試引用）。
+- `src/main/pty.ts:652` 仍走既有 `buildPtyEnv(process.env, userPath, opts.env)` — 繼承 host env。
+- `de03d3f5..HEAD` 對這三個檔案 **0 次後續變更**。
+
+→ **Contract exists ≠ Real Worker Runtime exists。** 這些是 source-only 契約，不是 runtime 完成。
+
+## B native proof 狀態
+
+- **`109990e2` test: add ConPTY Job ownership proof harness** — `tools/research-job-conpty-proof.ps1`（383+ 行）、
+  `test/research-job-conpty-proof.test.cjs`、`test/fixtures/research-job-conpty-child.cjs`。
+  9 個 scenario：`normal-descendant, root-early-exit, bounded-stop, timeout, query-failure,
+  helper-failure, receipt-failure, unrelated-sentinel, pty-io`；creation-time ConPTY + 直接 Job-list 雙屬性、
+  無 post-creation membership fallback、無 PID discovery、無 shell runner。
+- **`b7617416` fix: make ConPTY Job proof evidence diagnostic** — evidence/diagnostic 修正。
+- **B native state = `NOT_RUN` / NO ACCEPTED NATIVE RECEIPT（VERIFIED）**：
+  `.tmp/` 下不存在任何 `conpty-job-proof-*` / `conpty-admission-*` root；`tasks/` 無 B native receipt。
+- 本輪重新執行（**僅 test-suite evidence，非 native proof**）：
+  - `node --test test/codex-worker-contract.test.cjs` → **9 pass / 0 fail / 0 skip**
+  - `node --test test/research-job-conpty-proof.test.cjs` → **13 pass / 0 fail / 0 skip**
+    （13 項中 5 項帶 `skip: process.platform !== 'win32'`，本機為 win32 故實際執行、未 skip；
+    其餘 8 項為 platform-independent 的 harness 靜態／契約檢查。native mode 從不被 test harness 選用。）
+- harness 預設與 `-CompileOnly` / `-AdmissionOnly` 路徑皆**不執行 native**；僅顯式 `-Native` 才會建立固定 fixture child，
+  且本輪未執行。
+
+**下一個 B blocker（decision-ready，未執行、需新授權）：**
+在 Windows 上完成 **actual native ConPTY + creation-time `JOB_LIST` proof** —— 即讓 harness 以顯式 `-Native`
+在 fixed synthetic `conpty-job-proof-<6char>` root 下建立固定 inert fixture，取得 native receipt，
+證明 creation-time PTY/Job ownership、bounded stop 與 `VERIFIED_EMPTY` cleanup。
+在此 proof 通過前，production wiring 不得被視為已證實；本輪不執行它。
+
+## Harness / governance checkpoint
+
+- `5d595971` chore: add project-local OMP harness — `.omp/{AGENTS.md,RULES.md,config.yml,agents/*,commands/*,skills/*}`；
+  治理與權威，執行機制交由 OMP native。
+- 事故後治理鏈（全部 local-only，除 `47a63075` 已為 live remote）：
+  - `47a63075` fix: harden OMP incident safety boundary — **live remote checkpoint**
+  - `a0002cd1` fix: reconcile OMP governance boundaries — local-only
+  - `bf1e37a9` fix: retarget reviewer model roles for independent review — local-only
+  - `2bbaf058` fix: clarify OMP authority envelope semantics — local-only
+
+**`bf1e37a9` commit-level verification（VERIFIED，本輪 PHASE 1）**
+
+- parent = `a0002cd1`；subject 相符；changed paths 精確 2：`.omp/AGENTS.md`、`.omp/config.yml`。
+- config delta 僅限 model-role routing 與其直接對應註解。role routing before → after：
+  - `smol` `deepseek-v4.1-flash:low` → 不變
+  - `task` `gpt-5.6-luna:medium` → 不變
+  - `slow` `deepseek-v4-pro:high` → `kimi-k2.7-code:high`
+  - `risk` `kimi-k2.7-code:high` → `gpt-5.6-sol:high`
+  - `deep` `gpt-5.6-sol:high` → 不變
+- **FACT / known routing property**：`risk` 與 `deep` 現為**相同** concrete model identity（`gpt-5.6-sol:high`）；
+  `slow`（first review）與 `risk`（second review）為**不同** concrete model identity。
+  此為 routing 事實，非 blocker —— Harness 未要求 `risk` 與 `deep` 必須不同。
+  （註：「first review / second review」對應關係出自 `config.yml` 該行註解；bundled `reviewer` agent 是否
+  確實採 `@slow`，在 bundled agent 定義不可檢視的前提下為 `UNKNOWN`，不影響上述 routing 事實與 Gate 結論。）
+- invariants 未被修改：`modelRoleStorage: project`、`task.maxRecursionDepth: 1`、`task.maxConcurrency: 4`；
+  `bash.patterns` 仍**精確 9 條** Git hard deny 且全為 `approval: deny`
+  （`git push*`、`git reset --hard*`、`git clean -*`、`git stash drop*`、`git stash clear*`、`git rebase*`、
+  `git filter-branch*`、`git commit --amend*`、`git restore*`）。無新增 nested-OMP pattern、
+  `tools.approval*`、`launch.enabled`、extension 或 hook。
+- `.omp/AGENTS.md` 描述與 config 一致：改後該列僅述「Read-only by construction (no `bash`)」，
+  與 `risk-reviewer.md` 的 `tools:` 清單（無 `bash`）相符；**已移除**原本的
+  「Different model expected (`@risk`), but that family separation is `INFERENCE`」措辭。
+  全 `.omp/` 無任何「family separation guaranteed / different model guaranteed」類宣稱；
+  `config.yml` 反而明寫 separation「is a mapping, not a runtime guarantee」。
+- `2bbaf058` 未修改 `.omp/AGENTS.md` 或 `.omp/config.yml`；current HEAD 兩者與 `bf1e37a9` byte-identical。
+- 原則保持：**model routing is PROVISIONAL，不是 architecture requirement**；不得作為 B/C 的 blocker。
+
+## Incident durable lesson（2026-09-14，簡要）
+
+- fresh OMP 以 repository subdirectory 為 cwd 啟動 → project settings / `bash.patterns` policy 未載入
+  → destructive Git probe 作用於真實 repo → 五個 dirty files 被 revert → 逐 byte 復原完成。
+- 最終 forensic audit 未發現無法解釋的 mutation；**remote 未被改變**。
+- 事故後 established safety boundary：effective policy 必須**驗證已載入**（檔案存在 != policy 生效）；
+  native `task` delegation 為預設；nested/fresh OMP 需 explicit Human authority；
+  destructive Git/policy probe 需**完全隔離的 disposable Git repo**；
+  **declared boundary != enforced boundary**；`bash.patterns` 是 safety floor，不是 containment。
+- 此為 durable lesson，**不是新 milestone**。
+
+## H continuous observation — RESULT_TRANSPORT_FRICTION
+
+- Authority Wording Closure 期間，strict structured `yield` 因 harness 錯誤
+  `yield cannot contain both data and error` 連續失敗，risk-reviewer 以 `status: failed (exit 1)` 結束。
+- Reviewer 的**分析本身已完成**；Main 最終由**同一次 agent analysis**透過 alternate native result retrieval
+  取得 review conclusion，並自行 reconcile primary evidence（未重跑第二次審查）。
+- 分類：`RESULT_TRANSPORT_FRICTION` —— **不是** candidate defect，**不是**新 product milestone。
+- Disposition：`OBSERVE / RECORD`。**不建立** custom result bus / wrapper / plugin / hook / scheduler。
+  若 B/C 重複出現，再評估升格為 Harness / Runtime improvement candidate。
+
+## Current roadmap truth
+
+- **B + C 仍是 primary Delivery**；**H = continuous obligation**（非獨立 phase，永不「完成」）；
+  **R = deferred / not opened**。
+- 目前**沒有**開始 C implementation，**沒有**開始 R work。
+- 原始 31 success criteria 完全不變；A/B/C/H/R 僅為 execution roadmap。
+- incident 治理工作**不構成** B/C 已開始或完成的證據。
+- 下一 B 步驟為上方 B native blocker；需新的明確 Human 授權與 exact candidate/run，本輪不執行。
+
 # 2026-09-13 A1 native-007 — PASS / FINAL CLOSURE EVIDENCE
 
 - A1 FINAL CLOSURE = PASS at Git checkpoint `02cf5d8704525dd0df9c41db0a8bfa1c58eab68c`; candidate `a1-native-007`, SHA256 `640b5d19573fb7d71e0d39562ea0d70714a4cae9f38dbbb4c58e419fcd9a7c7b`.
