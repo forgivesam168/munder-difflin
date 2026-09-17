@@ -100,12 +100,25 @@ route to an exception, and the exception is narrower than "the Human authorized 
 
 **What authorization must be.** The Human must name the **exact invocation** (what will be run)
 and the **exact purpose** (why). Authorization for a similar task, a previous cycle's approval, a
-role, an envelope, or an "obviously implied" need is **not** authorization. That exception:
+role, or an "obviously implied" need is **not** authorization; nor is any envelope that is
+**invalid** under `### Human authorization` below (agent-created, inferred, stale, expired,
+previous-cycle, transferred, or out-of-scope). A **valid** Human-granted envelope **is** a
+legitimate source — but only where it explicitly covers the requested scope, invocation, purpose
+and cycle. That exception:
 
 - does **not** form reusable authority — it is spent by the invocation it names;
 - is **not** transferable to another invocation, purpose, branch, or cycle;
 - does **not** convert into general delegation authority, and does not relax `### Delegation`;
 - does **not** survive the task that carried it.
+
+**Reuse and repetition.** One authorization covers **only** the invocation it names and is
+**consumed** once that invocation is spent: it authorizes exactly **one** execution. A stated
+purpose by itself — "verify the harness", "perform recovery", "run review" — does **not** license
+a second or open-ended execution. To execute more than once, the Human must explicitly authorize
+one of: an **exact repetition count**, a **bounded set of invocations**, or a **clearly bounded
+invocation sequence**. The same test governs a valid envelope: unless it explicitly covers the
+repetition, it authorizes **one** invocation. Main's dispatch, a Task Contract, the Goal, program
+urgency, agent role, and Full Access **never** substitute for that Human authorization.
 
 If the authorized purpose is itself a **review**, **probe**, **recovery**, or **fresh-session
 verification**, the invocation may proceed under this section — but only while every condition
@@ -146,9 +159,20 @@ this rule exists** — the paragraph above is the whole boundary.
 "Human authorization" means exactly one of:
 
 - an **explicit instruction from the Human in the current conversation**; or
-- an **authority envelope the Human explicitly granted** for the current program or task.
+- an **authority envelope the Human explicitly granted** for the current program or task — a
+  **legitimate** source, but only where the requested action falls inside that envelope's
+  explicit **scope, invocation, purpose and cycle of applicability**.
 
-It may **not** be inferred from any of the following — none of these is authorization:
+An **invalid** envelope is not authorization, and none of the following is a source of authority:
+
+- an **agent-created** or **Main-created** envelope — an agent may not grant, extend, or bootstrap
+  its own authority;
+- an **inferred** envelope (the task "must therefore require" it);
+- a **stale**, **expired**, **previous-cycle**, or **transferred** envelope;
+- an **out-of-scope** envelope, or one whose wording does **not** explicitly cover the requested
+  invocation and purpose.
+
+It may **not** be inferred from any of the following either — none of these is authorization:
 
 - task scope, or an agent's reading of what its task "must therefore require";
 - agent role, seniority, or being a reviewer/manager;
@@ -169,8 +193,9 @@ repository as its Git target**, and MUST NOT be relied upon to be stopped by the
 `--dry-run`, a URL rewrite, a `.tmp` cwd, or "the deny rule should catch it" are **not**
 sufficient.
 
-A **completely disposable** Git repository is created first. It must not be the Munder repository
-in any of these senses:
+A **completely disposable** Git repository is created first, and **every** condition below is an
+**independent precondition** that must **already hold before any mutation-capable probe runs** —
+not a property to be established once the probe is under way:
 
 - not a **subdirectory** of the Munder repository;
 - not a **registered worktree** of it (`git worktree`);
@@ -179,11 +204,13 @@ in any of these senses:
 - not sharing **refs**;
 - its **working tree** is not the Munder working tree;
 - its **remote / push URL** does not point at the Munder repository or a path inside it;
-- the probe's **process cwd stays inside the disposable repository boundary**.
+- the probe's **process cwd is already inside the disposable repository boundary**.
 
-The proof must demonstrate the scratch `.git` is **not** Munder's **before** any mutation-capable
-probe runs — different repository root, different object database, different refs, different
-origin, different working tree. The goal is that **a probe failure cannot mutate Munder's refs,
+The **disposable repository's identity must be verified before the probe starts**: the proof must
+demonstrate the scratch `.git` is **not** Munder's — different repository root, different object
+database, different refs, different origin, different working tree — and that the probe process
+cwd is already inside the disposable boundary, **before** any mutation-capable probe runs. Only
+then may that probe execute. The goal is that **a probe failure cannot mutate Munder's refs,
 objects, index, working tree, or remote.**
 
 ## Truth

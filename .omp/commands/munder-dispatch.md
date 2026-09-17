@@ -16,11 +16,18 @@ with **no project settings policy in force** (project settings discovery is cwd-
 not walk up to an ancestor `.omp/`), so nothing this repository declares may be assumed present.
 See `.omp/RULES.md` § Incident safety boundary.
 
-**You cannot authorize yourself.** "Human authorization" means an explicit instruction from the
-Human in the current conversation, or an envelope the Human explicitly granted for the current
-program/task. It is never inferred from task scope, agent role, goal urgency, full access, a
-capability being available, a previous similar authorization, or the absence of a deny pattern.
-Without it: STOP and ask.
+**You cannot authorize yourself.** "Human authorization" means exactly one of: an **explicit
+instruction from the Human in the current conversation**, or an **authority envelope the Human
+explicitly granted** for the current program/task — that second one is legitimate **only** where
+the requested action falls inside the envelope's explicit scope, invocation, purpose and cycle of
+applicability. An envelope that is agent-created, inferred, stale, expired, previous-cycle,
+transferred, or out-of-scope is **not** authorization. Authorization is never inferred from task
+scope, agent role, goal urgency, full access, a capability being available, a previous similar
+authorization, or the absence of a deny pattern. One authorization covers **only** the invocation
+it names and is consumed by it — a stated purpose ("verify the harness", "perform recovery", "run
+review") does not license repeated execution; more than one execution requires the Human to
+explicitly authorize an exact repetition count, a bounded set of invocations, or a clearly bounded
+invocation sequence. Without it: STOP and ask.
 
 Before dispatching, decide and state:
 
@@ -41,16 +48,18 @@ Before dispatching, decide and state:
 5. **Probe isolation.** Does this task exercise Git deny policy, destructive Git behaviour,
    `reset` / `clean` / `restore` / `amend`, force push, ref mutation, or matcher coverage? If yes,
    the probe MUST run against a **completely disposable** Git repository, never the Munder
-   repository — and it must not be the Munder repository in any of these senses: not a
-   **subdirectory** of it, not a **registered worktree**, not sharing a **linked/common gitdir**,
-   not sharing an **object database** (no `alternates`), not sharing **refs**, not the Munder
-   **working tree**, with a **remote/push URL that does not point at the Munder repo or a path
-   inside it**, and with the probe's **cwd inside the disposable boundary**. The proof must
-   demonstrate the scratch `.git` is not Munder's **before** any mutation-capable probe runs.
-   `--dry-run`, a URL rewrite, a `.tmp` cwd, or trusting the deny list to stop it are **not**
-   sufficient — the deny list is a floor, not containment, and a probe failure must not be able
-   to mutate Munder's refs, objects, index, working tree, or remote. See `.omp/RULES.md` §
-   Incident safety boundary.
+   repository — and **every** one of the following is an independent precondition that must
+   **already hold before any mutation-capable probe runs**: it must not be the Munder repository
+   as a **subdirectory** of it, a **registered worktree**, a repository sharing a **linked/common
+   gitdir**, a repository sharing an **object database** (no `alternates`), a repository sharing
+   **refs**, the Munder **working tree**, or one whose **remote/push URL** points at the Munder
+   repo or a path inside it; and the probe's **process cwd must already be inside the disposable
+   boundary**. The disposable repository's identity — different repository root, different object
+   database, different refs, different origin, different working tree — and the probe's cwd both
+   must be demonstrated **before** the probe starts, not asserted afterwards. `--dry-run`, a URL
+   rewrite, a `.tmp` cwd, or trusting the deny list to stop it are **not** sufficient — the deny
+   list is a floor, not containment, and a probe failure must not be able to mutate Munder's refs,
+   objects, index, working tree, or remote. See `.omp/RULES.md` § Incident safety boundary.
 
 Then dispatch with a task body containing all of:
 
@@ -74,12 +83,19 @@ Then dispatch with a task body containing all of:
   **no destructive Git / policy probe against the Munder repository** — if the task requires one,
   it runs in a completely disposable Git repository that is not the Munder repo as a
   subdirectory, registered worktree, shared gitdir, shared object database, shared refs, working
-  tree or remote target, whose `.git` is provably not Munder's before the probe runs, and whose
-  **probe process cwd stays inside the disposable repository boundary**;
+  tree or remote target, whose `.git` is provably not Munder's **before the probe runs**, and whose
+  **probe process cwd is already inside the disposable repository boundary before any
+  mutation-capable probe runs** — every one of these is a precondition established **before** the
+  probe starts, never asserted afterwards;
   **you cannot authorize yourself** — "the task implies it", agent role, urgency, full access, a
   capability being present, a previous similar authorization, and the absence of a deny pattern
   are **not** authorization, and none of them licenses a nested OMP process or a destructive
-  probe; without explicit Human authorization, STOP and ask; never convert `UNKNOWN` to `PASS`;
+  probe; neither is an agent-created, inferred, stale, expired, previous-cycle, transferred or
+  out-of-scope envelope, nor Main's dispatch, a Task Contract, the Goal or program urgency;
+  a single authorization is consumed by the one invocation it names, so more than one execution
+  requires the Human to explicitly authorize an exact repetition count, a bounded set of
+  invocations, or a clearly bounded invocation sequence; without explicit Human authorization,
+  STOP and ask; never convert `UNKNOWN` to `PASS`;
   `NOT_RUN` is never `PASS`; a negative result is a valid outcome; never weaken a test to
   manufacture green.
   Do **not** treat a custom agent's `autoloadSkills` as a substitute for this capsule: whether that
