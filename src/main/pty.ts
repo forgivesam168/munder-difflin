@@ -7,6 +7,8 @@ import { ensureKilled, hardKillTree } from './procKill';
 import { expandTilde } from './fs';
 import { buildPtyEnv } from './ptyEnv';
 import { captureFromLoginShell, isSafeCommandName, userShellPath } from './shellEnv';
+import { launchOwnedPty, type OwnedPtyReceipt } from './windowsOwnedPty';
+import { consumePreparedBoundedWorker, type PreparedBoundedWorker } from './boundedWorker';
 
 /** APPEND the hive's bundled-node dir (`<HIVE_ROOT>/bin/runtime`, which holds a
  *  shim literally named `node`) to a child's PATH.
@@ -31,7 +33,8 @@ export function withHiveRuntimeFallback(path: string, hiveRoot?: string): string
 
 interface PtySession {
   id: string;
-  proc: pty.IPty;
+  proc: { pid: number; cols: number; rows: number; write(data: string): void; resize(cols: number, rows: number): void; kill(): void };
+  owned?: { completion: Promise<OwnedPtyReceipt>; stopping: boolean };
   cwd: string;
   command: string;
   /** The window (webContents) that spawned this PTY and should receive its
@@ -67,6 +70,8 @@ export interface SpawnOptions {
    *  MUST contain no embedded double-quotes (it is wrapped verbatim on Windows).
    *  `command` is still recorded for display but is not executed. */
   shellScript?: string;
+  /** Main-minted admission only; structural IPC objects cannot mint authority. */
+  boundedWorker?: PreparedBoundedWorker;
 }
 
 /**
@@ -331,6 +336,7 @@ export class PtyManager {
   killByOwner(wc: WebContents): void {
     for (const [id, s] of [...this.sessions.entries()]) {
       if (s.owner === wc) {
+        if (s.owned) { this.kill(id); continue; }
         try {
           const pid = s.proc.pid;
           s.proc.kill();
@@ -533,6 +539,7 @@ export class PtyManager {
     if (this.sessions.has(opts.id)) {
       return { ok: false, error: `pty already exists for id ${opts.id}` };
     }
+    if (opts.boundedWorker) return this.spawnBounded(opts, owner);
     // Defense-in-depth: cwd is already tilde-expanded at ingestion (spawnAgentCore),
     // but any other caller reaching the PTY directly gets the same treatment —
     // `existsSync('~/dev/foo')` is always false, only a shell expands `~`.
@@ -697,6 +704,61 @@ export class PtyManager {
     }
   }
 
+  private spawnBounded(opts: SpawnOptions, owner: WebContents | null): { ok: boolean; error?: string } {
+    try {
+      const prepared = consumePreparedBoundedWorker(opts.boundedWorker);
+      const launch = prepared.launch;
+      if (!launch || opts.id !== prepared.contract.workerId || opts.cwd !== prepared.cwd
+        || opts.command !== prepared.executablePath || opts.shellScript || opts.env
+        || launch.executablePath !== prepared.executablePath || launch.cwd !== prepared.cwd
+        || launch.executableSha256 !== prepared.contract.executable.executableSha256
+        || JSON.stringify(launch.args) !== JSON.stringify(prepared.args)
+        || JSON.stringify(launch.env) !== JSON.stringify(prepared.env)) {
+        throw new Error('Bounded worker launch does not match admission');
+      }
+      const session: PtySession = {
+        id: opts.id, cwd: prepared.cwd, command: prepared.executablePath,
+        owner, lastOutputAt: Date.now(), hasOutput: false,
+        proc: { pid: 0, cols: launch.cols, rows: launch.rows,
+          write: data => handle.write(data),
+          resize: (cols, rows) => { handle.resize(cols, rows); session.proc.cols = cols; session.proc.rows = rows; },
+          kill: () => handle.stop() }
+      };
+      this.sessions.set(opts.id, session);
+      const handle = launchOwnedPty(launch, {
+        onStarted: pid => { session.proc.pid = pid; },
+        onData: data => {
+          if (this.sessions.get(opts.id) !== session) return;
+          session.hasOutput = true;
+          session.lastOutputAt = Date.now();
+          this.safeSend(`pty:data:${opts.id}`, data, owner);
+        },
+        onExit: receipt => {
+          if (this.sessions.get(opts.id) !== session) return;
+          let acceptance: unknown;
+          try { acceptance = prepared.accept(receipt); }
+          catch (error) { acceptance = { state: 'UNKNOWN', error: error instanceof Error ? error.message : String(error) }; }
+          this.safeSend(`pty:bounded-result:${opts.id}`, { receipt, acceptance }, owner);
+          this.safeSend(`pty:exit:${opts.id}`, { exitCode: receipt.rootExit, receipt, acceptance }, owner);
+          this.sessions.delete(opts.id);
+          try { this.exitHandler?.(opts.id, receipt.rootExit ?? undefined); } catch { /* owner teardown is isolated */ }
+        }
+      });
+      session.owned = { completion: handle.completion, stopping: false };
+      return { ok: true };
+    } catch (error) {
+      this.sessions.delete(opts.id);
+      return { ok: false, error: error instanceof Error ? error.message : String(error) };
+    }
+  }
+
+  /** Bounded sessions stay registered until native cleanup and result acceptance. */
+  boundedCompletion(id: string): Promise<OwnedPtyReceipt> | undefined {
+    return this.sessions.get(id)?.owned?.completion;
+  }
+
+  isBounded(id: string): boolean { return !!this.sessions.get(id)?.owned; }
+
   write(id: string, data: string): { ok: boolean; error?: string } {
     const s = this.sessions.get(id);
     if (!s) return { ok: false, error: `no pty: ${id}` };
@@ -736,6 +798,10 @@ export class PtyManager {
   kill(id: string): { ok: boolean; error?: string } {
     const s = this.sessions.get(id);
     if (!s) return { ok: false, error: `no pty: ${id}` };
+    if (s.owned) {
+      if (!s.owned.stopping) { s.owned.stopping = true; s.proc.kill(); }
+      return { ok: true };
+    }
     try {
       const pid = s.proc.pid;
       s.proc.kill();
@@ -784,10 +850,17 @@ export class PtyManager {
    *  so the synchronous sweep is the only reliable reaper at quit. POSIX keeps
    *  the graceful path: closing the pty HUPs the foreground process group, so
    *  trees die without us SIGKILLing mid-cleanup. */
-  killAll() {
+  killAll(): Promise<void> {
     this.exitHandler = null;
     const sweepNow = process.platform === 'win32';
+    const ownedCompletions: Promise<OwnedPtyReceipt>[] = [];
     for (const s of this.sessions.values()) {
+      if (s.owned) {
+        ownedCompletions.push(s.owned.completion);
+        s.owned.stopping = true;
+        s.proc.kill();
+        continue;
+      }
       const pid = s.proc.pid;
       if (sweepNow) {
         // Capture and kill the intact Windows process tree before closing
@@ -801,6 +874,7 @@ export class PtyManager {
         ensureKilled(pid);
       }
     }
-    this.sessions.clear();
+    for (const [id, session] of this.sessions) if (!session.owned) this.sessions.delete(id);
+    return Promise.all(ownedCompletions).then(() => undefined);
   }
 }

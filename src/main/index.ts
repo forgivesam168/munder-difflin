@@ -2534,6 +2534,7 @@ ipcMain.handle('pty:spawn', async (evt, opts: AgentSpawnOptions) => {
   if (!opts || typeof opts.id !== 'string' || typeof opts.cwd !== 'string' || typeof opts.command !== 'string') {
     return { ok: false, error: 'invalid SpawnOptions' };
   }
+  if ('boundedWorker' in opts || 'ownedLaunch' in opts) return { ok: false, error: 'bounded admission is main-process only' };
   // Record the spawning window as the PTY's owner so its output routes ONLY back
   // to that floor, then run the shared spawn core.
   const owner = BrowserWindow.fromWebContents(evt.sender)?.webContents ?? null;
@@ -2547,6 +2548,9 @@ ipcMain.handle('pty:spawn', async (evt, opts: AgentSpawnOptions) => {
  *  no renderer `evt`). `owner` is the window that should receive this PTY's output
  *  (null → the primary window). Behavior-identical to the prior inline handler. */
 async function spawnAgentCore(opts: AgentSpawnOptions, owner: Electron.WebContents | null): Promise<{ ok: boolean; error?: string; cwd?: string; worktreePath?: string; resumeNotFound?: boolean; resumed?: boolean; seedPrompt?: string }> {
+  // Main-minted bounded preparations bypass installers, broker grants, hive
+  // provisioning and host-environment construction. IPC cannot mint admission.
+  if (opts.boundedWorker) return ptyManager.spawn(opts, owner);
   // ── cwd INGESTION — expand `~` exactly once, here ───────────────────────────
   // This is the single door every agent spawn comes through (`pty:spawn` IPC and
   // the god-triggered ephemeral-worker watcher), so it is where a user-typed
@@ -2970,7 +2974,7 @@ ipcMain.handle('pty:kill', (_evt, id: string) => {
   // remove its isolated worktree, drop the maps). teardownPty is idempotent, so
   // node-pty firing onExit once the child actually dies is a harmless no-op.
   const res = ptyManager.kill(id);
-  teardownPty(id);
+  if (!ptyManager.isBounded(id)) teardownPty(id);
   return res;
 });
 ipcMain.handle('pty:list', () => ptyManager.list());
@@ -3238,7 +3242,7 @@ ipcMain.handle('config:changeHome', async (_evt, payload: unknown) => {
   // (Identical recovery path to resetAll — relaunch is the clean re-bind.)
   allowQuit = true;
   writeConfig({ harnessHome: newHome });
-  try { ptyManager.killAll(); } catch (e) { console.error('[changeHome] killAll:', e); }
+  try { await ptyManager.killAll(); } catch (e) { console.error('[changeHome] killAll:', e); }
   app.relaunch();
   app.exit(0);
   return { ok: true as const }; // unreachable (process exits) — typed for the renderer
@@ -3684,7 +3688,10 @@ ipcMain.handle('history:search', (_evt, query: unknown, limit: unknown) =>
 // ─── IPC: quit confirmation ─────────────────────────────────────────────────
 /** Tear the harness down and quit. Shared by the hard "kill all & quit" path
  *  and the closing-time conclusion (after the god confirmed the floor saved). */
-function teardownAndQuit(): void {
+let teardownStarted = false;
+async function teardownAndQuit(): Promise<void> {
+  if (teardownStarted) return;
+  teardownStarted = true;
   allowQuit = true;
   // Each teardown step is best-effort: a throw here (e.g. a dying child or a
   // half-torn-down socket) must never abort the quit or pop a crash dialog.
@@ -3702,12 +3709,12 @@ function teardownAndQuit(): void {
   try { reflector.stop(); } catch (e) { console.error('[quit] reflector.stop:', e); }
   try { persist.close(); } catch (e) { console.error('[quit] persist.close:', e); }
   try { hive.stopAllProxyBridges(); } catch (e) { console.error('[quit] stopAllProxyBridges:', e); }
-  try { ptyManager.killAll(); } catch (e) { console.error('[quit] killAll:', e); }
+  try { await ptyManager.killAll(); } catch (e) { console.error('[quit] killAll:', e); }
   app.quit();
 }
 ipcMain.handle('app:confirmClose', () => {
   closingTime.cancel(); // a hard quit overrides a closing time in progress
-  teardownAndQuit();
+  void teardownAndQuit();
 });
 ipcMain.handle('app:cancelClose', () => {
   // The modal closes on the renderer side. The one thing main owes anybody here
@@ -3736,7 +3743,7 @@ const closingTime = new ClosingTimeController(
   // sessions that ended with a hard quit — never archived, never able to ACK.
   () => [...new Set(ptyToAgent.values())],
   () => liveWebContents(),
-  () => teardownAndQuit(),
+  () => { void teardownAndQuit(); },
   // #7C.2 steering — the graceful interrupt that reaches deeply busy agents
   // at their next hook boundary instead of waiting for a Stop.
   control
@@ -3746,7 +3753,7 @@ ipcMain.handle('app:startClosingTime', () => closingTime.start());
 ipcMain.handle('app:cancelClosingTime', () => closingTime.cancel());
 
 // ─── IPC: full reset (wipe data + config, relaunch into onboarding) ──────────
-ipcMain.handle('app:resetAll', () => {
+ipcMain.handle('app:resetAll', async () => {
   allowQuit = true;
   // Tear everything down first so nothing writes back into the dirs we wipe.
   try { clearMissionTimers(); } catch (e) { console.error('[reset] clearMissionTimers:', e); }
@@ -3761,7 +3768,7 @@ ipcMain.handle('app:resetAll', () => {
   try { memory.stop(); } catch (e) { console.error('[reset] memory.stop:', e); }
   try { reflector.stop(); } catch (e) { console.error('[reset] reflector.stop:', e); }
   try { persist.close(); } catch (e) { console.error('[reset] persist.close:', e); }
-  try { ptyManager.killAll(); } catch (e) { console.error('[reset] killAll:', e); }
+  try { await ptyManager.killAll(); } catch (e) { console.error('[reset] killAll:', e); }
   try { hive.removeExposedCodexData(); } catch (e) { console.error('[reset] removeExposedCodexData:', e); }
   // Erase the hive (Michael's + every agent's memory, inboxes, tasks, board,
   // git history) and the semantic-memory palace. Only these harness-created
@@ -4376,7 +4383,7 @@ registerRealtimeActionIpc({
   controlSnapshot: (id) => control.snapshot(id),
   killAgent: (id) => {
     const r = ptyManager.kill(id);
-    teardownPty(id);
+    if (!ptyManager.isBounded(id)) teardownPty(id);
     // A voice (MAIN-initiated) kill: the renderer never removed the card itself
     // (unlike a UI kill), so tell the floor to archive it. Mirrors hive:agentSpawned.
     try { liveWebContents()?.send('hive:agentArchived', { id }); } catch { /* window torn down */ }
@@ -4589,6 +4596,10 @@ async function processSpawnRequest(filePath: string): Promise<void> {
     informGod(`[worker spawn rejected] ${reason}`, `Spawn-request ${basename(filePath)} rejected: ${reason}.`, slack);
     archiveRequest(filePath, '.failed');
   };
+  if ('boundedWorker' in raw || 'ownedLaunch' in raw) {
+    fail('bounded worker admission must originate in the trusted main process');
+    return;
+  }
 
   const objective = typeof raw.objective === 'string' ? raw.objective.trim() : '';
   if (!objective) { fail('missing "objective"'); return; }
@@ -4793,6 +4804,8 @@ async function ephemeralWorkerTick(): Promise<void> {
     //     worker-qa/worker-bizreview). A double teardown is a harmless no-op.
     for (const [workerId, rec] of [...liveWorkers]) {
       if (rec.releasing) continue;
+      // Native timeout/stop and durable acceptance own bounded completion.
+      if (ptyManager.isBounded(workerId)) continue;
       if (workerSignaledDone(workerId, rec.spawnedAt)) {
         // Success: the worker already replied in-thread; just release it.
         rec.releasing = true;
@@ -4951,7 +4964,7 @@ ipcMain.handle('workers:stop', (_evt, workerId: string): { ok: boolean; error?: 
   rec.releasing = true;
   console.log(`[worker] manual stop requested for ${workerId}`);
   try { ptyManager.kill(workerId); } catch (e) { return { ok: false, error: String(e) }; }
-  teardownPty(workerId);
+  if (!ptyManager.isBounded(workerId)) teardownPty(workerId);
   return { ok: true };
 });
 
@@ -5284,7 +5297,7 @@ app.on('window-all-closed', () => {
     // Full teardown, not a bare killAll: this path must also stop the proxy
     // sidecars and helper servers — on Windows a child is NOT killed when its
     // parent exits, so anything skipped here outlives the app.
-    teardownAndQuit();
+    void teardownAndQuit();
   }
 });
 
