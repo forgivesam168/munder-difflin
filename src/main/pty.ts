@@ -72,6 +72,13 @@ export interface SpawnOptions {
   shellScript?: string;
   /** Main-minted admission only; structural IPC objects cannot mint authority. */
   boundedWorker?: PreparedBoundedWorker;
+  /** Main-minted provider preflight only; structural IPC objects cannot mint
+   *  authority. This is NOT a launch request: the PTY layer must never interpret
+   *  it. Ingestion authenticates it in `spawnAgentCore` and returns fail-closed
+   *  before this layer is reached, and `spawn` itself refuses the field outright
+   *  before cwd expansion, command resolution, or any generic spawn effect, so a
+   *  bypassing caller cannot reach a generic path through it. */
+  providerWorkerPreflight?: unknown;
 }
 
 /**
@@ -538,6 +545,18 @@ export class PtyManager {
   spawn(opts: SpawnOptions, owner: WebContents | null = null): { ok: boolean; error?: string } {
     if (this.sessions.has(opts.id)) {
       return { ok: false, error: `pty already exists for id ${opts.id}` };
+    }
+    // Defense-in-depth. Ingestion (`spawnAgentCore`) already authenticates and
+    // fails closed before this layer, and this layer must NEVER interpret,
+    // authenticate, or execute a provider preflight. A caller that bypasses
+    // ingestion must not be able to turn the field into any effect, so refuse it
+    // HERE — before the bounded dispatch and before cwd expansion, command/shim
+    // resolution, env building, session registration, and every spawn. Production
+    // authentication stays in `spawnAgentCore`; this is only a refusal, and it
+    // cannot affect the bounded branch (a genuine bounded spawn never carries the
+    // preflight field; should one ever carry both, fail-closed refusal wins).
+    if (opts.providerWorkerPreflight !== undefined) {
+      return { ok: false, error: 'provider worker preflight is main-process only and is never launched by the PTY layer' };
     }
     if (opts.boundedWorker) return this.spawnBounded(opts, owner);
     // Defense-in-depth: cwd is already tilde-expanded at ingestion (spawnAgentCore),

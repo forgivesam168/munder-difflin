@@ -66,6 +66,7 @@ import * as integrations from './integrations';
 import { validateBaseUrl, buildAuthHeaders, resolveUpstreamUrl, secretRefFor, INTEGRATION_TEMPLATES } from '../shared/integrations';
 import { RosterStore } from './roster';
 import { buildWorkerLaunch } from './workerLaunch';
+import { decideProviderWorkerLaunch } from './providerWorker';
 import { ControlRegistry } from './control';
 import { WorkerWakeWatchdog, type WorkerWakeFacts } from './workerWake';
 import { inboxNudgeText } from '../shared/hiveNudge';
@@ -2534,7 +2535,9 @@ ipcMain.handle('pty:spawn', async (evt, opts: AgentSpawnOptions) => {
   if (!opts || typeof opts.id !== 'string' || typeof opts.cwd !== 'string' || typeof opts.command !== 'string') {
     return { ok: false, error: 'invalid SpawnOptions' };
   }
-  if ('boundedWorker' in opts || 'ownedLaunch' in opts) return { ok: false, error: 'bounded admission is main-process only' };
+  if ('boundedWorker' in opts || 'ownedLaunch' in opts || 'providerWorkerPreflight' in opts) {
+    return { ok: false, error: 'bounded and provider worker admission are main-process only' };
+  }
   // Record the spawning window as the PTY's owner so its output routes ONLY back
   // to that floor, then run the shared spawn core.
   const owner = BrowserWindow.fromWebContents(evt.sender)?.webContents ?? null;
@@ -2548,6 +2551,23 @@ ipcMain.handle('pty:spawn', async (evt, opts: AgentSpawnOptions) => {
  *  no renderer `evt`). `owner` is the window that should receive this PTY's output
  *  (null → the primary window). Behavior-identical to the prior inline handler. */
 async function spawnAgentCore(opts: AgentSpawnOptions, owner: Electron.WebContents | null): Promise<{ ok: boolean; error?: string; cwd?: string; worktreePath?: string; resumeNotFound?: boolean; resumed?: boolean; seedPrompt?: string }> {
+  // ── PROVIDER PREFLIGHT — the fail-closed ingestion seam ─────────────────────
+  // A Main-minted provider preflight is authenticated BY IDENTITY here, BEFORE the
+  // bounded branch and BEFORE every generic spawn effect below (cwd expansion,
+  // provider inference, the missing-CLI installer, worktree isolation, hive
+  // provisioning, env construction, remote, and the final PTY spawn). A forged or
+  // structural object throws and is refused; a genuine BLOCKED or even all-evidence
+  // READY preflight returns fail-closed, because this slice grants NO launch
+  // authority — the launch bridge to the bounded owned runtime does not exist yet.
+  // This branch NEVER calls PtyManager, spawnAgentCore recursively, a provider CLI,
+  // or any generic path: it returns a result and nothing else.
+  if (opts.providerWorkerPreflight !== undefined) {
+    try {
+      return { ok: false, error: decideProviderWorkerLaunch(opts.providerWorkerPreflight).reason };
+    } catch (error) {
+      return { ok: false, error: error instanceof Error ? error.message : String(error) };
+    }
+  }
   // Main-minted bounded preparations bypass installers, broker grants, hive
   // provisioning and host-environment construction. IPC cannot mint admission.
   if (opts.boundedWorker) return ptyManager.spawn(opts, owner);
@@ -4596,8 +4616,8 @@ async function processSpawnRequest(filePath: string): Promise<void> {
     informGod(`[worker spawn rejected] ${reason}`, `Spawn-request ${basename(filePath)} rejected: ${reason}.`, slack);
     archiveRequest(filePath, '.failed');
   };
-  if ('boundedWorker' in raw || 'ownedLaunch' in raw) {
-    fail('bounded worker admission must originate in the trusted main process');
+  if ('boundedWorker' in raw || 'ownedLaunch' in raw || 'providerWorkerPreflight' in raw) {
+    fail('worker admission must originate in the trusted main process');
     return;
   }
 
