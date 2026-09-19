@@ -8,7 +8,7 @@ import { expandTilde } from './fs';
 import { buildPtyEnv } from './ptyEnv';
 import { captureFromLoginShell, isSafeCommandName, userShellPath } from './shellEnv';
 import { launchOwnedPty, type OwnedPtyReceipt } from './windowsOwnedPty';
-import { consumePreparedBoundedWorker, type PreparedBoundedWorker } from './boundedWorker';
+import { classifyBoundedWorkerRecovery, consumePreparedBoundedWorker, type BoundedWorkerAcceptance, type BoundedWorkerAcceptanceError, type PreparedBoundedWorker } from './boundedWorker';
 
 /** APPEND the hive's bundled-node dir (`<HIVE_ROOT>/bin/runtime`, which holds a
  *  shim literally named `node`) to a child's PATH.
@@ -735,11 +735,12 @@ export class PtyManager {
         },
         onExit: receipt => {
           if (this.sessions.get(opts.id) !== session) return;
-          let acceptance: unknown;
+          let acceptance: BoundedWorkerAcceptance | BoundedWorkerAcceptanceError;
           try { acceptance = prepared.accept(receipt); }
           catch (error) { acceptance = { state: 'UNKNOWN', error: error instanceof Error ? error.message : String(error) }; }
-          this.safeSend(`pty:bounded-result:${opts.id}`, { receipt, acceptance }, owner);
-          this.safeSend(`pty:exit:${opts.id}`, { exitCode: receipt.rootExit, receipt, acceptance }, owner);
+          const recovery = classifyBoundedWorkerRecovery(receipt, acceptance);
+          this.safeSend(`pty:bounded-result:${opts.id}`, { receipt, acceptance, recovery }, owner);
+          this.safeSend(`pty:exit:${opts.id}`, { exitCode: receipt.rootExit, receipt, acceptance, recovery }, owner);
           this.sessions.delete(opts.id);
           try { this.exitHandler?.(opts.id, receipt.rootExit ?? undefined); } catch { /* owner teardown is isolated */ }
         }

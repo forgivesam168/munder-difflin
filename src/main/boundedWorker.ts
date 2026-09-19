@@ -163,6 +163,64 @@ export interface BoundedWorkerRejected {
 }
 export type BoundedWorkerAcceptance = BoundedWorkerAccepted | BoundedWorkerRejected;
 
+export interface BoundedWorkerAcceptanceError { readonly state: 'UNKNOWN'; readonly error: string }
+export type BoundedWorkerRecoveryReason = 'STOP_REQUESTED' | 'DURABLE_PASS' | 'DURABLE_FAIL'
+  | 'DUPLICATE_OR_CONFLICT' | 'PUBLICATION_OR_ACCEPTANCE_FAILURE' | 'NATIVE_RECEIPT_INVALID'
+  | 'CLEANUP_UNVERIFIED' | 'PASS_EXIT_CONFLICT' | 'TIMEOUT' | 'HELPER_FAILURE' | 'LAUNCH_FAILURE'
+  | 'RESULT_MISSING' | 'RESULT_INVALID' | 'TERMINAL_UNKNOWN';
+export interface BoundedWorkerRecoveryDecision {
+  readonly disposition: 'TERMINAL' | 'FRESH_ATTEMPT_ELIGIBLE' | 'RECONCILIATION_REQUIRED';
+  readonly reason: BoundedWorkerRecoveryReason;
+  readonly automaticAttempts: 0;
+  readonly freshAttemptEligible: boolean;
+  readonly providerNetwork: 'NOT_AUTHORIZED';
+  readonly freshAttemptRequirements: {
+    readonly authority: 'MAIN_ONLY';
+    readonly distinct: readonly ['PreparedBoundedWorker', 'runId', 'workerId', 'permitId', 'syntheticRoot', 'resultSlot', 'hostReceiptBinding'];
+    readonly contract: 'SAME_APPROVED_SOURCE_AND_TASK_UNLESS_MAIN_CREATES_NEW_TASK_CONTRACT';
+    readonly admission: 'ALL_CHECKS_REQUIRED';
+    readonly evidence: 'PRESERVE_WITHOUT_DELETE_OR_OVERWRITE';
+  };
+}
+const FRESH_ATTEMPT_REQUIREMENTS: BoundedWorkerRecoveryDecision['freshAttemptRequirements'] = Object.freeze({
+  authority: 'MAIN_ONLY',
+  distinct: Object.freeze(['PreparedBoundedWorker', 'runId', 'workerId', 'permitId', 'syntheticRoot', 'resultSlot', 'hostReceiptBinding'] as const),
+  contract: 'SAME_APPROVED_SOURCE_AND_TASK_UNLESS_MAIN_CREATES_NEW_TASK_CONTRACT',
+  admission: 'ALL_CHECKS_REQUIRED', evidence: 'PRESERVE_WITHOUT_DELETE_OR_OVERWRITE'
+});
+
+/** Classification only: no filesystem effects, permit minting, or process launch. Eligibility
+ * is not authority; unverified ownership must be reconciled before any fresh attempt. */
+export function classifyBoundedWorkerRecovery(
+  receipt: OwnedPtyReceipt, acceptance: BoundedWorkerAcceptance | BoundedWorkerAcceptanceError
+): BoundedWorkerRecoveryDecision {
+  const decision = (disposition: BoundedWorkerRecoveryDecision['disposition'], reason: BoundedWorkerRecoveryReason): BoundedWorkerRecoveryDecision => Object.freeze({
+    disposition, reason, automaticAttempts: 0, freshAttemptEligible: disposition === 'FRESH_ATTEMPT_ELIGIBLE',
+    providerNetwork: 'NOT_AUTHORIZED', freshAttemptRequirements: FRESH_ATTEMPT_REQUIREMENTS
+  });
+  let native: NativeObservation;
+  try { native = readNativeObservation(receipt); }
+  catch { return decision('RECONCILIATION_REQUIRED', 'NATIVE_RECEIPT_INVALID'); }
+  // Stop never grants a rerun, including when acceptance itself failed.
+  if (native.reason === 'stop') return decision('TERMINAL', 'STOP_REQUESTED');
+  if ('error' in acceptance) return decision('RECONCILIATION_REQUIRED', 'PUBLICATION_OR_ACCEPTANCE_FAILURE');
+  if (acceptance.outcome === 'DUPLICATE') return decision('RECONCILIATION_REQUIRED', 'DUPLICATE_OR_CONFLICT');
+  if (native.activeProcessesFinal !== 0 || native.cleanupState !== 'VERIFIED_EMPTY'
+    || !native.ioDrained || !native.pseudoConsoleClosed) return decision('RECONCILIATION_REQUIRED', 'CLEANUP_UNVERIFIED');
+  if (acceptance.outcome === 'ACCEPTED') {
+    if (acceptance.result.result === 'PASS' && native.rootExit !== 0) return decision('RECONCILIATION_REQUIRED', 'PASS_EXIT_CONFLICT');
+    if (acceptance.result.result === 'FAIL') return decision('TERMINAL', 'DURABLE_FAIL');
+    if (acceptance.terminal.state === 'PASS') return decision('TERMINAL', 'DURABLE_PASS');
+  }
+  if (native.reason === 'timeout') return decision('FRESH_ATTEMPT_ELIGIBLE', 'TIMEOUT');
+  if (native.reason === 'helper-failure') return decision('FRESH_ATTEMPT_ELIGIBLE', 'HELPER_FAILURE');
+  if (native.reason === 'launch-failure') return decision('FRESH_ATTEMPT_ELIGIBLE', 'LAUNCH_FAILURE');
+  if (!native.rootJobMember || native.error) return decision('RECONCILIATION_REQUIRED', 'CLEANUP_UNVERIFIED');
+  if (acceptance.outcome === 'MISSING') return decision('FRESH_ATTEMPT_ELIGIBLE', 'RESULT_MISSING');
+  if (acceptance.outcome === 'INVALID') return decision('FRESH_ATTEMPT_ELIGIBLE', 'RESULT_INVALID');
+  return decision('RECONCILIATION_REQUIRED', 'TERMINAL_UNKNOWN');
+}
+
 /**
  * The immutable launch binding. Main hands this object — never a serialized
  * copy — to the trusted in-memory caller that launches the PTY.

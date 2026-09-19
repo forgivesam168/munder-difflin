@@ -7,7 +7,7 @@ const path = require('node:path');
 const crypto = require('node:crypto');
 const loadTs = require('./load-ts.cjs');
 const { createCodexWorkerContract } = loadTs('src/main/codexWorkerContract.ts');
-const { prepareBoundedWorker } = loadTs('src/main/boundedWorker.ts');
+const { prepareBoundedWorker, classifyBoundedWorkerRecovery } = loadTs('src/main/boundedWorker.ts');
 const { PtyManager } = loadTs('src/main/pty.ts');
 const hash = file => crypto.createHash('sha256').update(fs.readFileSync(file)).digest('hex');
 const repository = path.resolve(__dirname, '..');
@@ -37,9 +37,11 @@ function prepare(mode) {
 }
 
 for (const mode of ['pass', 'missing', 'malformed', 'stale', 'fail', 'descendant', 'io', 'timeout', 'stop']) {
-  test(`production PtyManager provider-free lifecycle: ${mode}`, { timeout: 60000 }, async () => {
+  test(`production PtyManager provider-free lifecycle: ${mode}`, { timeout: 60000 }, async t => {
     assert.equal(process.platform, 'win32', 'native evidence requires Windows; do not report a skipped proof as PASS');
     const { run, permit, prepared } = prepare(mode === 'stop' ? 'timeout' : mode);
+    const spawn = t.mock.method(require('node:child_process'), 'spawn');
+    const launch = t.mock.method(loadTs('src/main/windowsOwnedPty.ts'), 'launchOwnedPty');
     const manager = new PtyManager();
     const messages = [];
     let output = '';
@@ -69,6 +71,31 @@ for (const mode of ['pass', 'missing', 'malformed', 'stale', 'fail', 'descendant
     assert.equal(receipt.ioDrained, true);
     assert.equal(manager.list().length, 0);
     assert.ok(accepted);
+    const expectedRecovery = {
+      pass: ['TERMINAL', 'DURABLE_PASS'], descendant: ['TERMINAL', 'DURABLE_PASS'], io: ['TERMINAL', 'DURABLE_PASS'],
+      fail: ['TERMINAL', 'DURABLE_FAIL'], stop: ['TERMINAL', 'STOP_REQUESTED'],
+      missing: ['FRESH_ATTEMPT_ELIGIBLE', 'RESULT_MISSING'], malformed: ['FRESH_ATTEMPT_ELIGIBLE', 'RESULT_INVALID'],
+      stale: ['FRESH_ATTEMPT_ELIGIBLE', 'RESULT_INVALID'], timeout: ['FRESH_ATTEMPT_ELIGIBLE', 'TIMEOUT']
+    }[mode];
+    assert.deepEqual([accepted.recovery.disposition, accepted.recovery.reason], expectedRecovery);
+    assert.equal(accepted.recovery.automaticAttempts, 0);
+    assert.equal(accepted.recovery.freshAttemptEligible, expectedRecovery[0] === 'FRESH_ATTEMPT_ELIGIBLE');
+    assert.equal(accepted.recovery.providerNetwork, 'NOT_AUTHORIZED');
+    assert.deepEqual(accepted.recovery.freshAttemptRequirements, {
+      authority: 'MAIN_ONLY', distinct: ['PreparedBoundedWorker', 'runId', 'workerId', 'permitId', 'syntheticRoot', 'resultSlot', 'hostReceiptBinding'],
+      contract: 'SAME_APPROVED_SOURCE_AND_TASK_UNLESS_MAIN_CREATES_NEW_TASK_CONTRACT',
+      admission: 'ALL_CHECKS_REQUIRED', evidence: 'PRESERVE_WITHOUT_DELETE_OR_OVERWRITE'
+    });
+    assert.deepEqual(messages.find(message => message.channel.startsWith('pty:exit:')).value.recovery, accepted.recovery);
+    await new Promise(resolve => setImmediate(resolve));
+    assert.equal(launch.mock.callCount(), 1, 'recovery must not launch a second owned worker');
+    assert.equal(spawn.mock.callCount(), 1, 'recovery must not spawn another helper');
+    assert.equal(messages.filter(message => message.channel.startsWith('pty:bounded-result:')).length, 1);
+    assert.equal(manager.list().length, 0);
+    const replay = manager.spawn({ id: prepared.contract.workerId, cwd: prepared.cwd, command: prepared.executablePath, boundedWorker: prepared }, owner);
+    assert.equal(replay.ok, false, 'a fresh-attempt classification must not make the consumed preparation reusable');
+    assert.equal(launch.mock.callCount(), 1);
+    assert.equal(spawn.mock.callCount(), 1);
     if (['pass', 'descendant', 'io', 'fail'].includes(mode)) {
       assert.equal(accepted.acceptance.outcome, 'ACCEPTED');
       assert.equal(accepted.acceptance.terminal.state, mode === 'fail' ? 'FAIL' : 'PASS');
@@ -93,3 +120,42 @@ for (const mode of ['pass', 'missing', 'malformed', 'stale', 'fail', 'descendant
     if (mode === 'stop') assert.equal(receipt.reason, 'stop');
   });
 }
+
+test('recovery classification preserves terminal and reconciliation boundaries without launching', t => {
+  const spawn = t.mock.method(require('node:child_process'), 'spawn', () => { throw new Error('classification attempted a process launch'); });
+  const native = { rootPid: 123, rootExit: 0, rootJobMember: true, activeProcessesFinal: 0, cleanupState: 'VERIFIED_EMPTY', ioDrained: true, pseudoConsoleClosed: true, reason: 'exit' };
+  const missing = { outcome: 'MISSING', reason: 'durable task result is absent', bindingDigest: 'binding' };
+  // Pure decision inputs: no fabricated receipt is submitted to the durable consumer.
+  const accepted = (result, state) => ({ outcome: 'ACCEPTED', result: { result }, terminal: { state, reason: 'boundary' } });
+  const cases = [
+    [native, { outcome: 'DUPLICATE' }, 'RECONCILIATION_REQUIRED', 'DUPLICATE_OR_CONFLICT'],
+    [native, { state: 'UNKNOWN', error: 'publication failed' }, 'RECONCILIATION_REQUIRED', 'PUBLICATION_OR_ACCEPTANCE_FAILURE'],
+    [{ ...native, rootExit: 1 }, accepted('PASS', 'UNKNOWN'), 'RECONCILIATION_REQUIRED', 'PASS_EXIT_CONFLICT'],
+    [{ ...native, rootExit: null }, accepted('PASS', 'UNKNOWN'), 'RECONCILIATION_REQUIRED', 'PASS_EXIT_CONFLICT'],
+    [{ ...native, reason: 'timeout' }, accepted('FAIL', 'UNKNOWN'), 'TERMINAL', 'DURABLE_FAIL'],
+    [{ ...native, reason: 'stop' }, { state: 'UNKNOWN', error: 'publication failed' }, 'TERMINAL', 'STOP_REQUESTED'],
+    [{ ...native, reason: 'helper-failure' }, missing, 'FRESH_ATTEMPT_ELIGIBLE', 'HELPER_FAILURE'],
+    [{ ...native, reason: 'launch-failure', rootPid: null, rootJobMember: false }, missing, 'FRESH_ATTEMPT_ELIGIBLE', 'LAUNCH_FAILURE'],
+    [{ ...native, reason: 'helper-failure', cleanupState: 'UNVERIFIED' }, missing, 'RECONCILIATION_REQUIRED', 'CLEANUP_UNVERIFIED'],
+    [{ ...native, reason: 'launch-failure', activeProcessesFinal: null }, missing, 'RECONCILIATION_REQUIRED', 'CLEANUP_UNVERIFIED'],
+    [{ ...native, reason: 'timeout', ioDrained: false }, missing, 'RECONCILIATION_REQUIRED', 'CLEANUP_UNVERIFIED'],
+    [{ ...native, pseudoConsoleClosed: false }, missing, 'RECONCILIATION_REQUIRED', 'CLEANUP_UNVERIFIED'],
+    [{ ...native, rootJobMember: false }, missing, 'RECONCILIATION_REQUIRED', 'CLEANUP_UNVERIFIED'],
+    [{ ...native, error: 'native error' }, missing, 'RECONCILIATION_REQUIRED', 'CLEANUP_UNVERIFIED'],
+    [{ ...native, reason: 'invalid' }, missing, 'RECONCILIATION_REQUIRED', 'NATIVE_RECEIPT_INVALID'],
+    [native, accepted('UNKNOWN', 'UNKNOWN'), 'RECONCILIATION_REQUIRED', 'TERMINAL_UNKNOWN']
+  ];
+  for (const [receipt, acceptance, disposition, reason] of cases) {
+    const before = JSON.stringify({ receipt, acceptance });
+    const decision = classifyBoundedWorkerRecovery(receipt, acceptance);
+    assert.deepEqual([decision.disposition, decision.reason], [disposition, reason]);
+    assert.equal(decision.automaticAttempts, 0);
+    assert.equal(decision.freshAttemptEligible, disposition === 'FRESH_ATTEMPT_ELIGIBLE');
+    assert.equal(decision.providerNetwork, 'NOT_AUTHORIZED');
+    assert.equal(JSON.stringify({ receipt, acceptance }), before, 'classification must preserve its evidence');
+    assert.equal(Object.isFrozen(decision), true);
+    assert.equal(Object.isFrozen(decision.freshAttemptRequirements), true);
+    assert.equal(Object.isFrozen(decision.freshAttemptRequirements.distinct), true);
+  }
+  assert.equal(spawn.mock.callCount(), 0);
+});
