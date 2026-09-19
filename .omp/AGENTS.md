@@ -56,13 +56,41 @@ Main is **this session** — it is not a subagent and has no agent definition fi
 comes from the context files it loads (this file, `.omp/RULES.md`) and the settings in
 `.omp/config.yml`.
 
+### Stable role contract
+
+- **Main / PM** owns goal continuity, decomposition, dispatch, integration, candidate freeze,
+  authoritative compile/test/runtime validation, review orchestration, reconciliation, authorized
+  local Git transitions and durable handoff. PM ownership does not mean PM-only/no-coding.
+- **Developer** (`task` / `deep-worker`) inspects its assigned scope, implements/edits and
+  self-reviews its diff; reports `WRITING_COMPLETE`, not acceptance. Under native `task`, it
+  skips formatters and all build/lint/test/compile/runtime validation; Main runs required checks
+  after integration and freeze. Dispatch this restriction explicitly, including for bundled agents.
+- **Correctness Reviewer** performs read-only independent artifact/diff review; no implementation
+  or validation commands. Main supplies validation evidence and runs any missing required checks.
+- **Risk Reviewer** performs a read-only second review for material risk: security, native/process
+  ownership, credentials/network/filesystem authority, Electron/IPC privilege, updater or
+  plugin/Skill/MCP authority, destructive Git, production enablement, difficult-to-reverse
+  architecture, or material evidence conflict (including unsupported UNKNOWN-to-PASS promotion).
+
+Current GPT-6 / Astra native policy is `delegation-bias=restrained`: inline work first; no
+one-slice or sub-30-line delegation. Delegate only genuinely independent substantial slices under
+the native contract; never manufacture parallel work or a reviewer dispatch to satisfy ceremony.
+When native policy does not permit delegation, Main performs and identifies its own review;
+do not call that independent review. A required independent material-risk gate stays open until
+it can be satisfied under native policy. Project rules cannot enforce strict PM-only coding
+separation against that policy; changing model alone is not proof of such enforcement.
+
+Freeze only after writers are terminal and their write authority has ended. Bind Main validation
+and required reviews to the frozen candidate; changed candidate identity invalidates affected
+evidence and requires refreeze/revalidation/review, not automatic Human escalation.
+
 | Responsibility | Dispatch | Notes |
 | --- | --- | --- |
 | Reconnaissance, codebase and upstream research | `scout` | Only when a real research gap exists. Read-only. |
 | Routine bounded implementation | `task` | General worker, full tools. |
 | Escalated implementation | `deep-worker` | For runtime lifecycle, cross-module integration, architecture, or evidence-conflict work. |
-| Independent review of a change | `reviewer` | Separate from the developer. Always worth one pass on a bounded change. |
-| Second, independent risk review | `risk-reviewer` | Only for the high-risk classes listed in `.omp/RULES.md`. Read-only by construction (no `bash`). |
+| Independent correctness review | `reviewer` | Read-only; dispatch only when native delegation policy permits. |
+| Second, independent risk review | `risk-reviewer` | Material-risk classes above; read-only, no `bash`. |
 | Security-sensitive discovery | `security-reviewer` | Vulnerability-shaped scope only; not a general risk review. |
 
 Dispatch discipline:
@@ -73,9 +101,8 @@ Dispatch discipline:
 - Delegation is capped by `.omp/config.yml` (`task.maxRecursionDepth: 1`): **Main → one level
   only.** Subagents cannot spawn subagents, so decomposition and integration stay Main's job.
 - Main reconciles subagent claims against evidence. **A subagent's PASS is a claim, not a verdict.**
-- **Normal flow is `Worker → Main → next Worker`.** Main owns goal continuity, integration,
-  evidence reconciliation and completion. Agent-to-agent `hub` messaging is used only when a
-  specific need justifies it — not because the capability exists.
+- **When delegated, flow is `Worker → Main → next Worker`**, not mandatory delegation for
+  every change. Agent-to-agent `hub` messaging requires a specific need, not mere capability.
 - **OMP owns execution mechanics; this Harness owns governance.** Do not add a handoff protocol,
   mailbox or polling file, agent message bus, custom result bus, scheduler, parked-agent manager,
   recursion controller, or tool-loop detector. OMP natively provides agent execution, result
@@ -150,15 +177,25 @@ Main declares a task `complete` only when all hold — otherwise `NEEDS_FIX`, `B
 2. All required verification ran: exact commands, exit codes, test counts (total / passed /
    failed / skipped). `NOT_RUN` is never reported as `PASS`.
 3. No unclassified failure; no required-but-skipped test.
-4. No scope drift and no authority drift.
+4. No unresolved scope or authority deviation; apply `.omp/RULES.md` proportional handling.
 5. Every remaining `UNKNOWN` is listed explicitly.
 6. Required reviewers finished, and — for a high-risk class — the second, independent review
    finished. A second review that merely restates the first does not satisfy it.
+   Main self-review is not an independent review; report which review was actually performed.
 7. No integration claim exceeds the evidence behind it.
 
 Evidence conflict stays `OPEN` / `UNKNOWN` / `NEEDS_FIX`: re-review, escalate to `risk-reviewer`,
 or take it to the Human. Never resolve a conflict by asserting it away, and never hide an
 `UNKNOWN` to close a milestone.
+
+### Alignment checkpoint — 2026-09-19
+
+This role contract governs future dispatch; historical workflow records remain evidence, not
+instructions to repeat superseded ceremony. Original 31 criteria and B → C with H continuous
+remain unchanged. The unaccepted B-RUNTIME snapshot and compile-gate candidate are preserved;
+this alignment neither accepts them nor renews exhausted candidate/run authority. B remains
+paused until Human resumes it. Workflow is frozen after this alignment; reopen only for a
+concrete delivery blocker with Human authorization, not speculative OMP redesign.
 
 ## Human-facing reporting
 

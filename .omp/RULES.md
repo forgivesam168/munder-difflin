@@ -4,9 +4,8 @@ Repository-wide governance intent for Munder work. Read this as an obligation on
 it, not as a description of where the file travels.
 
 - The **Main session** loads this file and **must enforce it** on every dispatch it makes.
-- A **subagent does not reliably receive this file** — it is `UNKNOWN` whether project
-  `RULES.md` / `AGENTS.md` reach a subagent at all (see `.omp/AGENTS.md`). A subagent must
-  **never assume** these rules reached it.
+- A **subagent must not assume project context/rules were injected** (delivery limitation and
+  evidence caveats: `.omp/AGENTS.md`).
 - Therefore Main carries the task-relevant authority and safety rules to every subagent through
   the **Conduct Capsule** in `.omp/commands/munder-dispatch.md`, for bundled and custom agents
   alike.
@@ -80,11 +79,12 @@ never as an unchanged one. This section is a **`PROCEDURAL_BOUNDARY`** and a **`
 
 ### Delegation
 
-Delegation uses OMP's **native** mechanisms — the `task` tool and the agents in `.omp/agents/`.
-This is the **default and the only autonomous path**: never start another OMP process to
-delegate, review, probe, or work around a limitation on your own initiative. Subagents already
-get everything the native path provides; a nested process adds no authority and silently discards
-this repository's governance.
+When delegation is warranted by native policy, use OMP's **native `task` tool** and agents in
+`.omp/agents/`; inline work remains the default under restrained delegation. Never start another
+OMP process to delegate, review, probe, or bypass a limitation on your own initiative.
+Main carries the stable role contract in `.omp/AGENTS.md` into every dispatch: developers finish
+writing and diff self-review (`WRITING_COMPLETE`), skip validation/build/lint/tests/runtime, and
+Main owns authoritative validation after integration and candidate freeze. Reviewers are read-only.
 
 The **single** exception is an invocation the Human explicitly authorizes under `### Nested OMP`
 below. That exception is deliberate, exact, and narrow — see that section for what it does and
@@ -184,6 +184,27 @@ It may **not** be inferred from any of the following either — none of these is
 An agent must not **infer, extend, bootstrap, or manufacture** its own authority. If explicit
 authority is absent, the action is unauthorized: **STOP and ask the Human.** A capability is not
 a permit, and an envelope dies with the program or task that granted it.
+
+Within a valid Human-granted envelope, Main proceeds without repeated per-command approval;
+ask only for missing authority, scope expansion or an exhausted bound. This does not renew an
+expired envelope, reset candidate/run limits, or authorize a nested OMP invocation.
+
+### Proportional deviation handling
+
+A delegated worker's unauthorized validation command invalidates **that worker's validation
+evidence**; it is a task-contract deviation, not automatically an authority/safety incident.
+Main records the command and observed effects, rejects that validation as acceptance evidence,
+checks candidate integrity, and performs required validation within existing authority. Keep
+the raw historical evidence; do not rewrite the deviation as compliant or a FAIL as PASS.
+
+Escalate the deviation to an authority/safety stop only on concrete evidence of unauthorized
+persistent mutation, credential/network use, OS/admin action, destructive Git, remote/main
+mutation, or evidence destruction. Investigate concrete indicators proportionally; do not require
+proof that every theoretical repository-external side effect was absent. Unobserved effects stay
+UNKNOWN, not asserted absent and not by themselves a reason for an incident or fresh Human gate.
+Temporary writes still require dispatch scope; a bounded temporary-write deviation is recorded
+and reconciled, not excused by deletion. Ordinary missing-authority and exhausted-bound stops
+above still apply. This rule is prospective and does not reclassify historical Human decisions.
 
 ### Destructive probes
 

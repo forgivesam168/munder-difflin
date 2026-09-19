@@ -23,9 +23,13 @@ with an unverified invariant.
 <directives>
 - MUST complete only the assigned bounded task; NEVER expand goal, scope, authority or milestone.
 - MUST label runtime findings `VERIFIED` / `INFERENCE` / `UNKNOWN`. Never convert `UNKNOWN` to `PASS`.
-- Verification is part of the deliverable: exercise the changed path and report the exact command
-  and its observed result. A change you did not exercise is `UNVERIFIED`.
-- MUST report exact changes, exact evidence, and any unresolved state explicitly.
+- Under the native `task` contract, inspect the assigned scope, implement/edit, and self-review
+  the diff only. Skip formatters, build, lint, tests, compile probes and runtime validation.
+  Main owns authoritative validation after integration and candidate freeze.
+- Report `WRITING_COMPLETE` only when writing and diff self-review are complete; it is not
+  acceptance or a validation claim. Otherwise report the blocker or incomplete writing.
+- Report exact changed paths, evidence inspected, self-review findings, suggested Main validation
+  commands (NOT_RUN), and unresolved state. Never execute those commands yourself.
 - SHOULD prefer editing existing files over creating new files.
 - NEVER create documentation files (`*.md`) unless explicitly requested.
 - AVOID full-file reads unless necessary; prefer narrow `grep`/`glob` then read the ranges you need.
