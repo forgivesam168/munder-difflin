@@ -129,7 +129,6 @@ test('harness does not inherit the host environment or access network/credential
 test('fixed fixture is inert and has no arbitrary command or shell surface', () => {
   assert.match(fixture, /const FIXED_MODES = new Set/);
   assert.match(fixture, /process\.execPath, \[__filename, '--leaf'/);
-  assert.match(fixture, /stdio: 'inherit'/);
   assert.doesNotMatch(fixture, /exec\(/);
   assert.doesNotMatch(fixture, /execFile\(/);
   assert.doesNotMatch(fixture, /cmd\.exe|powershell\.exe|shell:\s*true/i);

@@ -50,10 +50,25 @@ if (mode === '--leaf') {
   const child = spawn(process.execPath, [__filename, '--leaf', String(duration)], {
     detached: true,
     windowsHide: true,
-    stdio: 'inherit'
+    stdio: ['ignore', 'pipe', 'ignore']
   });
   child.once('error', () => process.exit(67));
+  // A detached Windows process has no inherited console association. Relay
+  // only its actual readiness bytes before the root exits; the leaf survives.
+  const deadline = setTimeout(() => process.exit(68), 2000);
+  let pending = '';
+  child.stdout.setEncoding('utf8');
+  child.stdout.on('data', chunk => {
+    pending += chunk;
+    if (pending.length > 128) process.exit(69);
+    if (!pending.includes('\n')) return;
+    if (pending !== 'DESCENDANT_READY\n') process.exit(69);
+    clearTimeout(deadline);
+    child.stdout.pause();
+    process.stdout.write(pending + 'ROOT_EXIT\n', () => process.exit(0));
+  });
+  child.stdout.once('end', () => {
+    if (pending !== 'DESCENDANT_READY\n') process.exit(69);
+  });
   child.unref();
-  process.stdout.write('ROOT_EXIT\n');
-  process.exit(0);
 }
