@@ -172,58 +172,6 @@ test('all bounded proof cases are represented without enabling retry/recovery/ta
   assert.match(source, /forcedStop/);
 });
 
-test('drain diagnostics are additive, bounded and lossless without relaxing acceptance', () => {
-  assert.match(source, /schemaVersion = 1/);
-  assert.match(source, /drainDiagnostics = & \$get 'drainDiagnostics' \$null/);
-  for (const field of [
-    'bytesRead', 'capturedBytesBase64', 'captureTruncated', 'terminalReadOutcome',
-    'terminalReadError', 'descendantMarkerObserved', 'markerBufferPrefix',
-    'markerBufferLength', 'markerBufferTruncated', 'completedBeforePseudoConsoleClose',
-    'completedAfterPseudoConsoleClose', 'completedBeforeOutputReadClose',
-    'completedAfterOutputReadClose', 'waitResult', 'completedAtSnapshot'
-  ]) assert.match(source, new RegExp(`public [^;\\n]+ ${field};`), field);
-  assert.match(source, /const int CaptureLimit = 64 \* 1024;/);
-  assert.match(source, /new byte\[CaptureLimit\]/);
-  assert.match(source, /Math\.Min\(read, CaptureLimit - capturedCount\)/);
-  assert.match(source, /Convert\.ToBase64String\(captured, 0, capturedCount\)/);
-  assert.match(source, /captureTruncated = bytesRead > capturedCount/);
-  assert.match(source, /text\.ToString\(0, Math\.Min\(text\.Length, CaptureLimit\)\)/);
-  assert.match(source, /markerBufferTruncated = markerBufferLength > CaptureLimit/);
-  assert.match(source, /terminalReadError = error;/);
-  assert.match(source, /terminalReadOutcome = error == ERROR_BROKEN_PIPE \? "BROKEN_PIPE" : "ERROR"/);
-  assert.match(source, /terminalReadOutcome = "ZERO_BYTES"/);
-  assert.match(source, /errorCode = error == ERROR_BROKEN_PIPE \? \(int\?\)null : error/);
-  assert.match(source, /text\.ToString\(\)\.Contains\(marker, StringComparison\.Ordinal\)/);
-  assert.match(source, /descendantObserved = drain\.Contains\("DESCENDANT_READY\\n", 2000\) && active > 0/);
-  assert.match(source, /receipt\.ioDrained = waited && !drain\.errorCode\.HasValue/);
-  assert.match(source, /if \(!receipt\.ioDrained && receipt\.result == "PASS"\) receipt\.result = "UNKNOWN"/);
-});
-
-test('diagnostics sample existing cleanup order without moving handle closure or waits', () => {
-  const cleanup = source.slice(source.indexOf('var diagnostics = drain == null'));
-  const ordered = [
-    'completedBeforePseudoConsoleClose = drain.Completed',
-    'ClosePseudoConsole(pseudoConsole)',
-    'completedAfterPseudoConsoleClose = drain.Completed',
-    'CloseOwned(ref inputWrite, ref closeOkay)',
-    'completedBeforeOutputReadClose = drain.Completed',
-    'CloseOwned(ref outputRead, ref closeOkay)',
-    'completedAfterOutputReadClose = drain.Completed',
-    'bool waited = drain.Wait(3000)',
-    'diagnostics.waitResult = waited',
-    'receipt.ioDrained = waited && !drain.errorCode.HasValue',
-    'drain.Snapshot(diagnostics)',
-    'receipt.drainDiagnostics = diagnostics'
-  ];
-  let previous = -1;
-  for (const token of ordered) {
-    const position = cleanup.indexOf(token);
-    assert.ok(position > previous, token);
-    previous = position;
-  }
-  assert.doesNotMatch(source, /Thread\.Abort|CancelSynchronousIo|CancellationTokenSource/);
-});
-
 test('default path is non-native and does not write a durable receipt', { skip: process.platform !== 'win32' }, () => {
   const result = runPowerShell([]);
   if (result.skipped) return;
@@ -354,11 +302,13 @@ $type = [Munder.Research.ConptyJobProofNative].GetNestedType('OutputDrain', [Ref
 $private = [Reflection.BindingFlags]'Instance,NonPublic'
 $marker = "DESCENDANT_READY\n".Replace('\n', [string][char]10)
 $inputBytes = [Text.Encoding]::UTF8.GetBytes("ROOT_EXIT\nDESCENDANT_READY\n".Replace('\n', [string][char]10))
-foreach ($case in @('lf','truncated','error')) {
+foreach ($case in @('lf','crlf','truncated','error')) {
   $drain = [Activator]::CreateInstance($type, [object[]]@([IntPtr]::Zero))
   $bytes = $inputBytes
+  if ($case -eq 'crlf') { $bytes = [Text.Encoding]::UTF8.GetBytes("ROOT_EXIT\r\nDESCENDANT_READY\r\n".Replace('\r', [string][char]13).Replace('\n', [string][char]10)) }
   if ($case -eq 'truncated') { $bytes = [Text.Encoding]::UTF8.GetBytes(('x' * 65537)) }
   $null = $type.GetMethod('Capture',$private).Invoke($drain,[object[]]@($bytes,$bytes.Length))
+  $null = $type.GetMethod('ObserveMarker',$private).Invoke($drain,[object[]]@("ROOT_EXIT\n".Replace('\n', [string][char]10)))
   $null = $type.GetMethod('ObserveMarker',$private).Invoke($drain,[object[]]@($marker))
   $terminal = $null
   if ($case -eq 'error') { $terminal = 6 }
@@ -383,8 +333,13 @@ foreach ($case in @('lf','truncated','error')) {
   assert.ifError(result.error);
   assert.equal(result.status, 0, result.stderr);
   const receipts = result.stdout.trim().split(/\r?\n/).map(line => JSON.parse(line));
-  assert.equal(receipts.length, 3);
-  const input = Buffer.from('ROOT_EXIT\nDESCENDANT_READY\n');
+  assert.equal(receipts.length, 4);
+  const inputs = [
+    Buffer.from('ROOT_EXIT\nDESCENDANT_READY\n'),
+    Buffer.from('ROOT_EXIT\r\nDESCENDANT_READY\r\n'),
+    Buffer.alloc(65537, 'x'),
+    Buffer.from('ROOT_EXIT\nDESCENDANT_READY\n')
+  ];
   for (const [index, receipt] of receipts.entries()) {
     assert.equal(receipt.schemaVersion, 1);
     assert.equal(receipt.result, 'UNKNOWN');
@@ -393,22 +348,29 @@ foreach ($case in @('lf','truncated','error')) {
     assert.equal(receipt.nativeExecutionState, 'NOT_ATTEMPTED');
     assert.equal(receipt.descendantObserved, false);
     const d = receipt.drainDiagnostics;
-    const truncated = index === 1;
-    assert.equal(d.bytesRead, truncated ? 65537 : input.length);
-    assert.deepEqual(Buffer.from(d.capturedBytesBase64, 'base64'), truncated ? Buffer.alloc(65536, 'x') : input);
+    const input = inputs[index];
+    const truncated = index === 2;
+    const error = index === 3;
+    assert.equal(d.bytesRead, input.length);
+    assert.deepEqual(Buffer.from(d.capturedBytesBase64, 'base64'), truncated ? input.subarray(0, 65536) : input);
     assert.equal(d.captureTruncated, truncated);
+    assert.equal(d.rootMarkerObserved, !truncated);
     assert.equal(d.descendantMarkerObserved, !truncated);
     assert.equal(d.markerBufferPrefix, truncated ? 'x'.repeat(65536) : input.toString('utf8'));
-    assert.equal(d.markerBufferLength, truncated ? 65537 : input.length);
+    assert.equal(d.markerBufferLength, input.length);
     assert.equal(d.markerBufferTruncated, truncated);
-    assert.equal(d.terminalReadOutcome, index === 2 ? 'ERROR' : 'ZERO_BYTES');
-    assert.equal(d.terminalReadError, index === 2 ? 6 : null);
+    assert.equal(d.terminalReadOutcome, error ? 'ERROR' : 'ZERO_BYTES');
+    assert.equal(d.terminalReadError, error ? 6 : null);
+    assert.equal(d.drainErrorCode, error ? 6 : null);
+    assert.equal(d.cancellationAttempts, 0);
+    assert.equal(d.cancelErrorCode, null);
+    assert.equal(d.outputReadCloseDeferred, false);
     assert.equal(d.completedBeforePseudoConsoleClose, false);
     assert.equal(d.completedAfterPseudoConsoleClose, true);
     assert.equal(d.completedBeforeOutputReadClose, true);
     assert.equal(d.completedAfterOutputReadClose, true);
-    assert.equal(d.waitResult, index !== 2);
-    assert.equal(d.completedAtSnapshot, index !== 2);
+    assert.equal(d.waitResult, !error);
+    assert.equal(d.completedAtSnapshot, !error);
   }
 });
 

@@ -11,6 +11,9 @@
     fixed inert fixture, builds one STARTUPINFOEX attribute list containing
     both the pseudoconsole and direct Job-list attributes, and uses only the
     bounded TerminateJobObject stop path for forced cleanup.
+
+    Transport lifetime changes do not establish stdio routing.  The native
+    root-early-exit claim still requires both fixed markers in drained bytes.
 #>
 [CmdletBinding()]
 param(
@@ -354,6 +357,7 @@ namespace Munder.Research {
         public bool captureTruncated;
         public string terminalReadOutcome;
         public int? terminalReadError;
+        public bool? rootMarkerObserved;
         public bool? descendantMarkerObserved;
         public string markerBufferPrefix;
         public int? markerBufferLength;
@@ -364,6 +368,15 @@ namespace Munder.Research {
         public bool? completedAfterOutputReadClose;
         public bool? waitResult;
         public bool completedAtSnapshot;
+        public int? drainErrorCode;
+        public bool? cancellationRequested;
+        public bool cancellationUsed;
+        public bool? cancellationStoppedReader;
+        public int cancellationAttempts;
+        public int? cancelErrorCode;
+        public bool? waitAfterCancellation;
+        public bool outputReadCloseDeferred;
+        public int? closeFailureError;
     }
 
     public static class ConptyJobProofNative {
@@ -375,6 +388,7 @@ namespace Munder.Research {
         const uint HANDLE_FLAG_INHERIT = 0x00000001;
         const uint ERROR_INSUFFICIENT_BUFFER = 122;
         const uint ERROR_BROKEN_PIPE = 109;
+        const uint THREAD_TERMINATE = 0x0001;
         const uint WAIT_OBJECT_0 = 0;
         const uint WAIT_TIMEOUT = 258;
         const int JobObjectBasicAccountingInformation = 1;
@@ -470,6 +484,13 @@ namespace Munder.Research {
         static extern bool WriteFile(IntPtr hFile, byte[] lpBuffer, uint nNumberOfBytesToWrite, out uint lpNumberOfBytesWritten, IntPtr lpOverlapped);
         [DllImport("kernel32.dll", SetLastError = true)]
         [return: MarshalAs(UnmanagedType.Bool)]
+        static extern bool CancelSynchronousIo(IntPtr hThread);
+        [DllImport("kernel32.dll", SetLastError = true)]
+        static extern IntPtr OpenThread(uint dwDesiredAccess, bool bInheritHandle, uint dwThreadId);
+        [DllImport("kernel32.dll")]
+        static extern uint GetCurrentThreadId();
+        [DllImport("kernel32.dll", SetLastError = true)]
+        [return: MarshalAs(UnmanagedType.Bool)]
         static extern bool CloseHandle(IntPtr hObject);
 
         sealed class UnknownProof : Exception { public UnknownProof(string message) : base(message) { } }
@@ -480,16 +501,26 @@ namespace Munder.Research {
             readonly StringBuilder text = new StringBuilder();
             const int CaptureLimit = 64 * 1024;
             readonly byte[] captured = new byte[CaptureLimit];
+            readonly ManualResetEventSlim readerThreadReady = new ManualResetEventSlim(false);
+            IntPtr readerThread = IntPtr.Zero;
+            int openedError;
+            int cancelError;
+            int cancelAttempts;
+            int closeReaderError;
             int capturedCount;
             long bytesRead;
             string terminalReadOutcome = "PENDING";
             int? terminalReadError;
+            bool? rootMarkerObserved;
             bool? descendantMarkerObserved;
             string markerBufferPrefix;
             int? markerBufferLength;
-            // Existing matching text remains unchanged; diagnostic copies are bounded.
             bool ObserveMarker(string marker) {
-                bool found = text.ToString().Contains(marker, StringComparison.Ordinal);
+                string value = text.ToString();
+                bool found = value.Contains(marker, StringComparison.Ordinal) ||
+                    (marker.EndsWith("\n", StringComparison.Ordinal) &&
+                     value.Contains(marker.Substring(0, marker.Length - 1) + "\r\n", StringComparison.Ordinal));
+                if (marker == "ROOT_EXIT\n") rootMarkerObserved = found;
                 if (marker == "DESCENDANT_READY\n") {
                     descendantMarkerObserved = found;
                     markerBufferLength = text.Length;
@@ -505,11 +536,15 @@ namespace Munder.Research {
                     diagnostics.captureTruncated = bytesRead > capturedCount;
                     diagnostics.terminalReadOutcome = terminalReadOutcome;
                     diagnostics.terminalReadError = terminalReadError;
+                    diagnostics.drainErrorCode = errorCode;
+                    diagnostics.rootMarkerObserved = rootMarkerObserved;
                     diagnostics.descendantMarkerObserved = descendantMarkerObserved;
                     diagnostics.markerBufferPrefix = markerBufferPrefix;
                     diagnostics.markerBufferLength = markerBufferLength;
                     diagnostics.markerBufferTruncated = markerBufferLength > CaptureLimit;
                     diagnostics.completedAtSnapshot = Completed;
+                    diagnostics.cancellationAttempts = cancelAttempts;
+                    diagnostics.cancelErrorCode = cancelError == 0 ? (int?)null : cancelError;
                 }
             }
             public int? errorCode;
@@ -539,6 +574,13 @@ namespace Munder.Research {
                 }
             }
             void Read() {
+                readerThread = OpenThread(THREAD_TERMINATE, false, GetCurrentThreadId());
+                if (readerThread == IntPtr.Zero) openedError = Marshal.GetLastWin32Error();
+                readerThreadReady.Set();
+                if (readerThread == IntPtr.Zero) {
+                    RecordTerminal(openedError);
+                    return;
+                }
                 var buffer = new byte[4096];
                 while (true) {
                     uint read;
@@ -563,6 +605,36 @@ namespace Munder.Research {
                 lock (sync) { return ObserveMarker(marker); }
             }
             public bool Wait(int milliseconds) { return task != null && task.Wait(milliseconds); }
+            // True only if a synchronous cancel was actually issued against the
+            // reader; an aborted read may have left bytes unread.
+            public bool CancellationIssued { get { return Volatile.Read(ref cancelAttempts) > 0; } }
+            // CancelSynchronousIo is best effort and can miss the window between
+            // two reads, so this returns true only once the reader task has actually
+            // completed; no caller may treat an accepted cancel call as drained.
+            public bool StopReader(int attemptMilliseconds, int attempts) {
+                if (task == null) return false;
+                if (task.Wait(attemptMilliseconds)) return true;
+                if (readerThreadReady.Wait(1000) && readerThread != IntPtr.Zero) {
+                    for (int attempt = 0; attempt < attempts; attempt++) {
+                        // Between the timeout above and this iteration the reader may
+                        // have finished on its own; a cancel is then neither needed
+                        // nor issued, so the drain is not disqualified.
+                        if (task.IsCompleted) return true;
+                        Interlocked.Increment(ref cancelAttempts);
+                        if (!CancelSynchronousIo(readerThread)) cancelError = Marshal.GetLastWin32Error();
+                        if (task.Wait(attemptMilliseconds)) return true;
+                    }
+                }
+                return task.IsCompleted;
+            }
+            public bool CloseReaderThreadHandle() {
+                if (readerThread == IntPtr.Zero) return true;
+                bool okay = CloseHandle(readerThread);
+                if (!okay) closeReaderError = Marshal.GetLastWin32Error();
+                readerThread = IntPtr.Zero;
+                return okay;
+            }
+            public int ReaderCloseError { get { return closeReaderError; } }
         }
 
         static void Check(bool value, string stage) {
@@ -690,8 +762,6 @@ namespace Munder.Research {
                 Check(SetHandleInformation(inputWrite, HANDLE_FLAG_INHERIT, 0), "SetHandleInformation input");
                 Check(SetHandleInformation(outputRead, HANDLE_FLAG_INHERIT, 0), "SetHandleInformation output");
                 CheckHr(CreatePseudoConsole(new Coord(80, 25), inputRead, outputWrite, 0, out pseudoConsole), "CreatePseudoConsole");
-                CloseOwned(ref inputRead, ref closeOkay);
-                CloseOwned(ref outputWrite, ref closeOkay);
 
                 IntPtr attributeSize = IntPtr.Zero;
                 bool sizing = InitializeProcThreadAttributeList(IntPtr.Zero, 2, 0, ref attributeSize);
@@ -714,6 +784,10 @@ namespace Munder.Research {
                 Check(CreateProcessW(executable, commandLine, IntPtr.Zero, IntPtr.Zero, false,
                     EXTENDED_STARTUPINFO_PRESENT | CREATE_UNICODE_ENVIRONMENT, environmentBlock, root,
                     ref startup, out process), "CreateProcessW");
+                // The pseudoconsole transport endpoints must remain valid until
+                // the client process has consumed the PSEUDOCONSOLE attribute.
+                CloseOwned(ref inputRead, ref closeOkay);
+                CloseOwned(ref outputWrite, ref closeOkay);
                 receipt.rootCreationSucceeded = true;
                 receipt.rootProcessId = checked((int)process.dwProcessId);
 
@@ -743,7 +817,8 @@ namespace Munder.Research {
                     int active, queryError;
                     if (!QueryActive(job, out active, out queryError)) throw new UnknownProof("ActiveProcesses after root exit query failed: " + queryError);
                     receipt.activeProcessesAfterRootExit = active;
-                    receipt.descendantObserved = drain.Contains("DESCENDANT_READY\n", 2000) && active > 0;
+                    receipt.descendantObserved = drain.Contains("ROOT_EXIT\n", 2000) &&
+                        drain.Contains("DESCENDANT_READY\n", 2000) && active > 0;
                     if (scenario == "query-failure") {
                         BasicAccountingInformation ignored; uint returned;
                         if (QueryInformationJobObject(job, Int32.MaxValue, out ignored, (uint)Marshal.SizeOf(typeof(BasicAccountingInformation)), out returned))
@@ -813,6 +888,7 @@ namespace Munder.Research {
                     }
                 }
                 var diagnostics = drain == null ? null : new DrainDiagnostics();
+                bool outputReadDeferred = false;
                 if (diagnostics != null) diagnostics.completedBeforePseudoConsoleClose = drain.Completed;
                 if (pseudoConsole != IntPtr.Zero) {
                     ClosePseudoConsole(pseudoConsole);
@@ -821,15 +897,43 @@ namespace Munder.Research {
                 }
                 if (diagnostics != null) diagnostics.completedAfterPseudoConsoleClose = drain.Completed;
                 CloseOwned(ref inputWrite, ref closeOkay);
-                if (diagnostics != null) diagnostics.completedBeforeOutputReadClose = drain.Completed;
-                CloseOwned(ref outputRead, ref closeOkay);
-                if (diagnostics != null) diagnostics.completedAfterOutputReadClose = drain.Completed;
                 if (drain != null) {
                     bool waited = drain.Wait(3000);
                     diagnostics.waitResult = waited;
-                    receipt.ioDrained = waited && !drain.errorCode.HasValue;
+                    if (!waited) {
+                        // CancelSynchronousIo can arrive between two reads and stop
+                        // nothing.  StopReader only returns true once the reader task
+                        // has truly completed, so an accepted cancel call is never
+                        // reported as drained.
+                        diagnostics.cancellationRequested = true;
+                        diagnostics.cancellationStoppedReader = drain.StopReader(1500, 2);
+                        diagnostics.cancellationUsed = drain.CancellationIssued;
+                        diagnostics.waitAfterCancellation = drain.Completed;
+                        waited = diagnostics.cancellationStoppedReader == true;
+                    }
+                    bool readerStopped = waited;
+                    if (readerStopped) {
+                        diagnostics.completedBeforeOutputReadClose = drain.Completed;
+                        CloseOwned(ref outputRead, ref closeOkay);
+                        diagnostics.completedAfterOutputReadClose = drain.Completed;
+                    } else {
+                        // A read is still pending.  Closing outputRead here would
+                        // invalidate the handle underneath ReadFile and destroy the
+                        // evidence via ERROR_INVALID_HANDLE, so the close is deferred
+                        // and process teardown owns this bounded, declared leak.
+                        diagnostics.outputReadCloseDeferred = true;
+                        outputReadDeferred = true;
+                        closeOkay = false;
+                    }
+                    // An aborted reader stopped by cancellation may have left bytes
+                    // unread, so it is never reported as drained.
+                    receipt.ioDrained = readerStopped && !diagnostics.cancellationUsed && drain.errorCode == null;
                     drain.Snapshot(diagnostics);
                     receipt.drainDiagnostics = diagnostics;
+                    if (readerStopped && !drain.CloseReaderThreadHandle()) {
+                        diagnostics.closeFailureError = drain.ReaderCloseError;
+                        closeOkay = false;
+                    }
                     if (!receipt.ioDrained && receipt.result == "PASS") receipt.result = "UNKNOWN";
                 }
                 if (attributesInitialized) DeleteProcThreadAttributeList(attributes);
@@ -864,6 +968,8 @@ namespace Munder.Research {
                 CloseOwned(ref sentinel.hProcess, ref closeOkay);
                 CloseOwned(ref inputRead, ref closeOkay);
                 CloseOwned(ref outputWrite, ref closeOkay);
+                // Close unassigned or completed-reader handles, never a live read.
+                if (!outputReadDeferred) CloseOwned(ref outputRead, ref closeOkay);
                 if (job != IntPtr.Zero) { CloseOwned(ref job, ref closeOkay); }
                 if (!closeOkay && receipt.result == "PASS") receipt.result = "UNKNOWN";
                 if (receipt.cleanupState != "VERIFIED_EMPTY" && receipt.result == "PASS") receipt.result = "UNKNOWN";
