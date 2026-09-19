@@ -79,16 +79,51 @@ never as an unchanged one. This section is a **`PROCEDURAL_BOUNDARY`** and a **`
 
 ### Delegation
 
-When delegation is warranted by native policy, use OMP's **native `task` tool** and agents in
-`.omp/agents/`; inline work remains the default under restrained delegation. Never start another
-OMP process to delegate, review, probe, or bypass a limitation on your own initiative.
-Main carries the stable role contract in `.omp/AGENTS.md` into every dispatch: developers finish
-writing and diff self-review (`WRITING_COMPLETE`), skip validation/build/lint/tests/runtime, and
-Main owns authoritative validation after integration and candidate freeze. Reviewers are read-only.
+For the current **B → C program**, the Human explicitly authorizes and requires role-separated
+delivery through OMP-native delegation.
 
-The **single** exception is an invocation the Human explicitly authorizes under `### Nested OMP`
-below. That exception is deliberate, exact, and narrow — see that section for what it does and
-does not grant.
+The stable responsibility boundary is:
+
+- **Main / PM / Orchestrator / Integrator** owns Goal continuity, decomposition, Task Contracts,
+  dispatch, integration, candidate freeze, authoritative compile/test/runtime validation, review
+  orchestration, evidence reconciliation, authorized local Git transitions, and durable handoff.
+- **Routine candidate implementation** in production source or tests belongs to the Developer role
+  and is delegated through OMP's native `task` tool or the project `deep-worker` when escalation is
+  justified.
+- Main does **not** become the routine Developer merely because an implementation is small,
+  localized, or apparently obvious.
+- **Developer** inspects the explicitly assigned scope, implements/edits only within that scope,
+  self-reviews the resulting diff, reports exact changes and unresolved state, then returns
+  `WRITING_COMPLETE`.
+- Under OMP's native `task` contract, delegated Developers **skip formatters and all
+  build/lint/test/compile/runtime validation**. Developer-reported implementation completion is a
+  claim, not acceptance evidence.
+- Main waits until all mutation-capable writers for the candidate are terminal, independently
+  inspects the integrated diff, computes the candidate identity, and freezes the candidate.
+- Main then performs the required authoritative compile/test/runtime validation against that exact
+  frozen identity.
+- **Correctness Reviewer** and **Risk Reviewer** are read-only. They review the frozen candidate
+  and the Main-supplied evidence; they do not implement fixes or execute validation commands.
+- Findings requiring implementation return to a new bounded Developer cycle. Main reconciles the
+  findings but does not silently become the Developer to apply them.
+
+Do not manufacture parallel slices, extra agents, or artificial scope merely to satisfy
+delegation ceremony. A single bounded Developer task is legitimate when real implementation work
+exists and the current Human role-separation instruction applies. Parallel delegation is used only
+for genuinely independent slices.
+
+Delegation uses OMP's **native** mechanisms only. Never start another OMP process to delegate,
+review, probe, or bypass a limitation on your own initiative. Subagents do not reliably inherit
+project `RULES.md` / `AGENTS.md`, so Main must carry the task-relevant authority, write scope,
+non-goals, validation restriction, and safety boundaries in every dispatch.
+
+A subagent's response, `WRITING_COMPLETE`, `PASS`, or other status is still only a **claim**.
+Main remains responsible for artifact inspection, evidence binding, integration, acceptance, and
+completion.
+
+The **single** exception to the prohibition on starting another OMP process is an invocation the
+Human explicitly authorizes under `### Nested OMP` below. That exception is deliberate, exact,
+and narrow — see that section for what it does and does not grant.
 
 ### Nested OMP
 

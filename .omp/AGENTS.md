@@ -60,7 +60,8 @@ comes from the context files it loads (this file, `.omp/RULES.md`) and the setti
 
 - **Main / PM** owns goal continuity, decomposition, dispatch, integration, candidate freeze,
   authoritative compile/test/runtime validation, review orchestration, reconciliation, authorized
-  local Git transitions and durable handoff. PM ownership does not mean PM-only/no-coding.
+  local Git transitions and durable handoff. Routine candidate production-source/test implementation
+  belongs to the Developer role; Main remains the PM / Integrator / authoritative validator.
 - **Developer** (`task` / `deep-worker`) inspects its assigned scope, implements/edits and
   self-reviews its diff; reports `WRITING_COMPLETE`, not acceptance. Under native `task`, it
   skips formatters and all build/lint/test/compile/runtime validation; Main runs required checks
@@ -72,13 +73,28 @@ comes from the context files it loads (this file, `.omp/RULES.md`) and the setti
   plugin/Skill/MCP authority, destructive Git, production enablement, difficult-to-reverse
   architecture, or material evidence conflict (including unsupported UNKNOWN-to-PASS promotion).
 
-Current GPT-6 / Astra native policy is `delegation-bias=restrained`: inline work first; no
-one-slice or sub-30-line delegation. Delegate only genuinely independent substantial slices under
-the native contract; never manufacture parallel work or a reviewer dispatch to satisfy ceremony.
-When native policy does not permit delegation, Main performs and identifies its own review;
-do not call that independent review. A required independent material-risk gate stays open until
-it can be satisfied under native policy. Project rules cannot enforce strict PM-only coding
-separation against that policy; changing model alone is not proof of such enforcement.
+### Main / PM execution contract
+
+Main's model is Human-selected at runtime and is not persisted in project config.
+
+For the current B → C program, the Human explicitly requires role separation:
+
+- **Main / PM** owns goal continuity, decomposition, Task Contracts, dispatch, integration,
+  candidate freeze, authoritative compile/test/runtime validation, review orchestration,
+  reconciliation, authorized local Git transitions and durable handoff.
+- **Main does not perform routine candidate production-source or test implementation.**
+  Implementation is assigned through OMP-native `task` or `deep-worker`.
+- **Developer** (`task` / `deep-worker`) inspects the assigned scope, implements/edits,
+  self-reviews its diff and reports `WRITING_COMPLETE`.
+- Under the native `task` contract, delegated workers skip build/lint/test/compile/runtime
+  validation. Main performs authoritative validation after writers are terminal and the
+  integrated candidate is frozen.
+- **Correctness Reviewer** is read-only and independent of the developer.
+- **Risk Reviewer** is read-only and used for material security / authority / native-runtime risk.
+
+Do not manufacture delegation merely for ceremony, but do not collapse the PM and Developer
+roles merely because a change is small. The current Human decision is that routine implementation
+belongs to the Developer role.
 
 Freeze only after writers are terminal and their write authority has ended. Bind Main validation
 and required reviews to the frozen candidate; changed candidate identity invalidates affected
@@ -89,7 +105,7 @@ evidence and requires refreeze/revalidation/review, not automatic Human escalati
 | Reconnaissance, codebase and upstream research | `scout` | Only when a real research gap exists. Read-only. |
 | Routine bounded implementation | `task` | General worker, full tools. |
 | Escalated implementation | `deep-worker` | For runtime lifecycle, cross-module integration, architecture, or evidence-conflict work. |
-| Independent correctness review | `reviewer` | Read-only; dispatch only when native delegation policy permits. |
+| Independent correctness review | `reviewer` | Read-only; use after Main freeze/validation when independent correctness review is required. |
 | Second, independent risk review | `risk-reviewer` | Material-risk classes above; read-only, no `bash`. |
 | Security-sensitive discovery | `security-reviewer` | Vulnerability-shaped scope only; not a general risk review. |
 
@@ -101,8 +117,10 @@ Dispatch discipline:
 - Delegation is capped by `.omp/config.yml` (`task.maxRecursionDepth: 1`): **Main → one level
   only.** Subagents cannot spawn subagents, so decomposition and integration stay Main's job.
 - Main reconciles subagent claims against evidence. **A subagent's PASS is a claim, not a verdict.**
-- **When delegated, flow is `Worker → Main → next Worker`**, not mandatory delegation for
-  every change. Agent-to-agent `hub` messaging requires a specific need, not mere capability.
+- **For candidate implementation, flow is `Worker → Main → next Worker`.** Main may directly
+  perform PM-owned orchestration, evidence handling, authoritative validation, durable handoff,
+  and other non-implementation work. Agent-to-agent `hub` messaging requires a specific need,
+  not mere capability.
 - **OMP owns execution mechanics; this Harness owns governance.** Do not add a handoff protocol,
   mailbox or polling file, agent message bus, custom result bus, scheduler, parked-agent manager,
   recursion controller, or tool-loop detector. OMP natively provides agent execution, result
@@ -210,10 +228,10 @@ Roles are declared once in `.omp/config.yml`; agents reference roles (`@smol`, `
 `@risk`, `@deep`) and never concrete model ids. Swapping a model, or retargeting a whole
 workflow at a different provider, is a one-line change there.
 
-**Every current mapping is PROVISIONAL** — a working default, not an architecture requirement, and
-not backed by field evidence. Do not cite a role's model as "the better model", and do not treat
-this routing as a blocker for Munder work. Main's own model is deliberately unset at project scope
-so it stays the Human's choice.
+**Every current mapping is PROVISIONAL** — a working default, not an architecture requirement.
+Field evidence is still incomplete and does not establish any current mapping as "the better model".
+Do not treat routing as a blocker for Munder work. Main's own model is deliberately unset at
+project scope so it stays the Human's runtime choice.
 
 `modelRoleStorage: project` is set, so `/model` role assignments persist to this repository's
 `.omp/config.yml` rather than the global config.

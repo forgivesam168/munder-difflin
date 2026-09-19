@@ -1,8 +1,8 @@
 # Munder — OMP project-local settings.
 #
 # Loaded only when OMP's working directory has a non-empty `.omp/` directory; deep-merged
-# over `~/.omp/agent/config.yml`. Records merge, arrays are REPLACED wholesale — so nothing
-# array-valued is set here.
+# over `~/.omp/agent/config.yml`. Records merge; arrays are REPLACED wholesale. The only
+# project array intentionally declared here is the complete `bash.patterns` deny list below.
 #
 # Deliberately NOT set here:
 #   modelRoles.default    — Main's model stays the Human's choice (global config).
@@ -23,20 +23,20 @@ modelRoles:
   # a model or a whole provider is a one-line change here.
   #
   # PROVISIONAL ROUTING — every entry below is a working default, not an architecture requirement.
-  # None of these choices is backed by Munder field evidence yet; do not cite them as "the better
-  # model". `default` is intentionally absent so Main stays the Human's selection.
+  # Field evidence is still incomplete and does not establish any mapping as "the better model".
+  # `default` is intentionally absent so Main stays the Human's runtime selection.
   smol: cliproxyapi/deepseek-v4.1-flash:low  # PROVISIONAL — reconnaissance, scout, tiny background work
   task: cliproxyapi/deepseek-v4.1-flash:low  # PROVISIONAL — routine bounded implementation
   slow: cliproxyapi/kimi-k2.7-code:high      # PROVISIONAL — first review (`reviewer`)
-  risk: cliproxyapi/gpt-5.6-sol:high         # PROVISIONAL — second risk review; same model as `deep`
-  deep: cliproxyapi/gpt-5.6-sol:high         # PROVISIONAL — escalated implementation
+  risk: cliproxyapi/glm-5.3-flash:high       # PROVISIONAL — read-only security/risk review
+  deep: cliproxyapi/gpt-6-astra:low         # PROVISIONAL — escalated implementation
   #
-  # 2026-09-15: `slow` now carries the model that `risk` previously carried, and `risk` now
-  # carries `deep`'s; `deep` is unchanged and the former `slow` model (deepseek-v4-pro) is no
-  # longer used by any role. Purpose: `reviewer` takes `@slow`, so the first reviewer no longer
-  # runs in the same family as Main. That is model-selector separation only — every role mapped
-  # in this file is on the single `cliproxyapi` provider — and it is a mapping, not a runtime
-  # guarantee. Read the session's `model_change` record to see what a given run actually used.
+  # 2026-09-19 routing:
+  # task/smol = routine implementation/reconnaissance
+  # slow = independent correctness review
+  # risk = read-only security/risk review
+  # deep = difficult native/cross-module implementation escalation
+  # Main remains Human-selected at runtime and is intentionally not persisted here.
 
 task:
   # Main -> exactly one delegation level. Children get no `task` tool, so subagents cannot
