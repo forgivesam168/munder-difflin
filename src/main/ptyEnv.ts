@@ -102,9 +102,10 @@ export interface CodexWorkerEnvironmentInput {
   temp: string;
   tmp: string;
   codexHome: string;
+  systemRoot: string;
 }
 
-const CODEX_ENV_INPUT_KEYS = ['path', 'home', 'userProfile', 'temp', 'tmp', 'codexHome'] as const;
+const CODEX_ENV_INPUT_KEYS = ['path', 'home', 'userProfile', 'temp', 'tmp', 'codexHome', 'systemRoot'] as const;
 
 function assertCodexEnvironmentInput(input: CodexWorkerEnvironmentInput): void {
   if (!input || typeof input !== 'object'
@@ -117,7 +118,7 @@ function assertCodexEnvironmentInput(input: CodexWorkerEnvironmentInput): void {
       throw new Error('Invalid Codex environment inputs');
     }
   }
-  if (![input.home, input.userProfile, input.temp, input.tmp, input.codexHome].every(isCanonicalAbsolutePath)) {
+  if (![input.home, input.userProfile, input.temp, input.tmp, input.codexHome, input.systemRoot].every(isCanonicalAbsolutePath)) {
     throw new Error('Codex environment directories must be canonical absolute paths');
   }
 }
@@ -141,7 +142,8 @@ export function buildCodexWorkerEnv(input: CodexWorkerEnvironmentInput): Record<
     CODEX_HOME: input.codexHome,
     TERM: 'xterm-256color',
     COLORTERM: 'truecolor',
-    FORCE_COLOR: '1'
+    FORCE_COLOR: '1',
+    SYSTEMROOT: input.systemRoot
   });
 }
 
@@ -168,7 +170,7 @@ export function validateCodexWorkerEnv(
       throw new Error('Invalid Codex environment value');
     }
   }
-  if (![env.HOME, env.USERPROFILE, env.TEMP, env.TMP, env.CODEX_HOME].every(isCanonicalAbsolutePath)) {
+  if (![env.HOME, env.USERPROFILE, env.TEMP, env.TMP, env.CODEX_HOME, env.SYSTEMROOT].every(isCanonicalAbsolutePath)) {
     throw new Error('Codex environment directories must be canonical absolute paths');
   }
   if (env.TERM !== 'xterm-256color' || env.COLORTERM !== 'truecolor' || env.FORCE_COLOR !== '1') {

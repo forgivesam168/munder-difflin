@@ -17,7 +17,7 @@ export type CredentialMode = 'NONE' | 'DEDICATED_PREPROVISIONED';
 
 export const CODEX_ENV_ALLOWLIST = [
   'PATH', 'HOME', 'USERPROFILE', 'TEMP', 'TMP', 'CODEX_HOME',
-  'TERM', 'COLORTERM', 'FORCE_COLOR'
+  'TERM', 'COLORTERM', 'FORCE_COLOR', 'SYSTEMROOT'
 ] as const;
 export type CodexEnvironmentKey = (typeof CODEX_ENV_ALLOWLIST)[number];
 
@@ -291,6 +291,7 @@ function evaluateEnvironment(c: CodexWorkerContract, e?: EnvironmentPolicyEviden
   if (!e) return unknown('bounded environment evidence not supplied'); const env = e.env; const keys = Object.keys(env).sort(); const expected = [...CODEX_ENV_ALLOWLIST].sort();
   if (keys.length !== expected.length || keys.some((key, i) => key !== expected[i]) || keys.some(isCredentialLikeEnvironmentKey)) return blocked('environment is not the fixed credential-free allowlist');
   if (typeof env.PATH !== 'string' || !env.PATH || /\x00/.test(env.PATH)) return blocked('PATH must be explicit and non-empty');
+  if (!isCanonicalAbsolutePath(env.SYSTEMROOT) || isPathWithin(env.SYSTEMROOT, c.rootPolicy.root)) return blocked('SYSTEMROOT must be an explicit host directory outside the synthetic root');
   const p = c.environmentPolicy.dedicatedPaths;
   if (env.HOME !== p.HOME || env.USERPROFILE !== p.USERPROFILE || env.TEMP !== p.TEMP || env.TMP !== p.TMP || env.CODEX_HOME !== p.CODEX_HOME || env.TERM !== 'xterm-256color' || env.COLORTERM !== 'truecolor' || env.FORCE_COLOR !== '1') return blocked('dedicated environment values do not match policy');
   return [env.HOME, env.USERPROFILE, env.TEMP, env.TMP, env.CODEX_HOME].every(value => isCanonicalAbsolutePath(value) && isPathWithin(value, c.rootPolicy.root)) ? ready('environment uses only the explicit bounded allowlist') : blocked('dedicated environment paths leave the synthetic root');

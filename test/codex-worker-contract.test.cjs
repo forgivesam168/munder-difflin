@@ -47,7 +47,8 @@ const envInput = {
   userProfile: contract.rootPolicy.userProfileDir,
   temp: contract.rootPolicy.tempDir,
   tmp: contract.rootPolicy.tempDir,
-  codexHome: contract.rootPolicy.codexHomeDir
+  codexHome: contract.rootPolicy.codexHomeDir,
+  systemRoot: 'C:\\Windows'
 };
 
 function completeEvidence(overrides = {}) {
@@ -181,6 +182,13 @@ test('Codex environment uses only explicit dedicated inputs and no host/credenti
   assert.throws(() => validateCodexWorkerEnv({ ...env, OPENAI_API_KEY: 'synthetic' }), /allowlist/);
   assert.throws(() => validateCodexWorkerEnv({ ...env, NODE_OPTIONS: '--require=bad' }), /allowlist/);
   assert.throws(() => buildCodexWorkerEnv({ ...envInput, inherited: 'no' }), /inputs/);
+  assert.throws(() => validateCodexWorkerEnv({ ...env, SYSTEMROOT: undefined }), /value/);
+  assert.throws(() => validateCodexWorkerEnv({ ...env, SystemRoot: env.SYSTEMROOT }), /allowlist/);
+  assert.throws(() => validateCodexWorkerEnv({ ...env, SYSTEMROOT: 'relative' }), /canonical absolute/);
+  assert.throws(() => validateCodexWorkerEnv({ ...env, SYSTEMROOT: 'C:\\other' }, envInput), /mismatch/);
+  assert.equal(evaluateCodexAdmission(contract, completeEvidence({
+    environmentPolicy: { env: { ...env, SYSTEMROOT: contract.rootPolicy.workDir } }
+  })).gates.environmentPolicy.state, 'BLOCKED');
 });
 
 test('durable task result validates exact identity, schema, containment, and duplicate rejection', () => {

@@ -39,7 +39,7 @@ function prepare(mode) {
 for (const mode of ['pass', 'missing', 'malformed', 'stale', 'fail', 'descendant', 'io', 'timeout', 'stop']) {
   test(`production PtyManager provider-free lifecycle: ${mode}`, { timeout: 60000 }, async () => {
     assert.equal(process.platform, 'win32', 'native evidence requires Windows; do not report a skipped proof as PASS');
-    const { run, prepared } = prepare(mode === 'stop' ? 'timeout' : mode);
+    const { run, permit, prepared } = prepare(mode === 'stop' ? 'timeout' : mode);
     const manager = new PtyManager();
     const messages = [];
     let output = '';
@@ -72,7 +72,18 @@ for (const mode of ['pass', 'missing', 'malformed', 'stale', 'fail', 'descendant
     if (['pass', 'descendant', 'io', 'fail'].includes(mode)) {
       assert.equal(accepted.acceptance.outcome, 'ACCEPTED');
       assert.equal(accepted.acceptance.terminal.state, mode === 'fail' ? 'FAIL' : 'PASS');
+      // Same-object duplicate: the accepted in-memory preparation never re-consumes acceptance.
       assert.equal(prepared.accept(receipt).outcome, 'DUPLICATE');
+      // Durable duplicate: acceptance also published a host receipt for this binding, so a FRESH
+      // preparation from the same permit must fail closed on that durable artifact. This is a
+      // different path from the in-memory DUPLICATE above.
+      const durableReceipt = path.join(permit.hostReceiptDir, `bounded-worker-${prepared.bindingDigest}.json`);
+      assert.equal(accepted.acceptance.receiptPath, durableReceipt);
+      assert.equal(fs.existsSync(durableReceipt), true, 'an accepted scenario must leave its durable host receipt');
+      assert.throws(
+        () => prepareBoundedWorker(permit),
+        { message: 'Bounded worker host receipt directory already holds an acceptance receipt' }
+      );
     } else {
       assert.notEqual(accepted.acceptance.outcome, 'ACCEPTED');
     }

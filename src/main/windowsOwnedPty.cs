@@ -33,6 +33,7 @@ namespace Munder.WindowsOwnedPty
         public bool ioDrained { get; set; }
         public bool pseudoConsoleClosed { get; set; }
         public string reason { get; set; } = "launch-failure";
+        [System.Text.Json.Serialization.JsonIgnore(Condition = System.Text.Json.Serialization.JsonIgnoreCondition.WhenWritingNull)]
         public string error { get; set; }
     }
 

@@ -383,9 +383,9 @@ function readOwnedBackend(
   if (typeof helperEnv.PATH !== 'string' || helperEnv.PATH.length === 0) {
     throw new Error('Bounded worker helper PATH must be explicit');
   }
-  // The helper's own HOME/TEMP family is required and must be canonical host directories outside the
-  // worker-writable synthetic root; APPDATA/LOCALAPPDATA are validated the same way when supplied.
-  const requiredHelperDirs = ['HOME', 'USERPROFILE', 'TEMP', 'TMP'] as const;
+  // The helper's HOME/TEMP family and explicit Windows OS directory must be canonical host directories
+  // outside the worker-writable synthetic root; APPDATA/LOCALAPPDATA are checked when supplied.
+  const requiredHelperDirs = ['HOME', 'USERPROFILE', 'TEMP', 'TMP', 'SYSTEMROOT'] as const;
   const optionalHelperDirs = ['APPDATA', 'LOCALAPPDATA'] as const;
   for (const key of requiredHelperDirs) {
     if (helperEnv[key] === undefined) throw new Error(`Bounded worker helper environment requires ${key}`);
@@ -625,13 +625,15 @@ export function prepareBoundedWorker(permit: BoundedWorkerPermit): PreparedBound
     if (!isPathWithin(directory, syntheticRoot)) throw new Error('Bounded worker root policy escaped the synthetic root');
   }
 
+  const backend = readOwnedBackend(permit.ownedBackend, syntheticRoot);
   const envInput: CodexWorkerEnvironmentInput = {
     path: workerPath, home: rootPolicy.homeDir, userProfile: rootPolicy.userProfileDir,
-    temp: rootPolicy.tempDir, tmp: rootPolicy.tempDir, codexHome: rootPolicy.codexHomeDir
+    temp: rootPolicy.tempDir, tmp: rootPolicy.tempDir, codexHome: rootPolicy.codexHomeDir,
+    // Windows crypto initialization needs the OS directory, not the helper's other environment values.
+    systemRoot: backend.helperEnv.SYSTEMROOT
   };
   // Built from explicit inputs only — no host environment is read or merged.
   const env = validateCodexWorkerEnv(buildCodexWorkerEnv(envInput), envInput);
-  const backend = readOwnedBackend(permit.ownedBackend, syntheticRoot);
   const launch: OwnedPtyLaunch = Object.freeze({
     ...backend, executablePath, executableSha256: contract.executable.executableSha256,
     args, cwd: rootPolicy.workDir, env

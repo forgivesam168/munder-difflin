@@ -6,9 +6,19 @@ const path = require('node:path');
 const { spawn } = require('node:child_process');
 const crypto = require('node:crypto');
 
+// The --leaf descendant must die on its own, after the root is already gone, so
+// the supervisor observes a Job that empties only when the descendant exits.
+// Root exit + result publication is sub-second, and the descendant scenario's
+// native lifetime bound is 12000ms: a 15000ms leaf could never finish first, so
+// the receipt reason would always be 'timeout' and the terminal state UNKNOWN.
+// 6000ms leaves several seconds of observed post-root-exit lifetime (a parent
+// exit that killed the descendant would resolve far earlier) while finishing
+// comfortably inside the bound.
+const LEAF_LIFETIME_MS = 6000;
+
 if (process.argv[2] === '--leaf') {
   process.stdout.write('LEAF_READY\n');
-  setTimeout(() => process.exit(0), 15000);
+  setTimeout(() => process.exit(0), LEAF_LIFETIME_MS);
 } else {
   const [requestPath, mode] = process.argv.slice(2);
   const modes = new Set(['pass', 'missing', 'malformed', 'stale', 'timeout', 'descendant', 'io', 'fail']);
@@ -17,8 +27,9 @@ if (process.argv[2] === '--leaf') {
   const { contract } = request;
   if (!contract || process.cwd() !== contract.rootPolicy.workDir) process.exit(65);
   const identity = Object.fromEntries(['candidateId', 'taskId', 'runId', 'workerId', 'taskDigest', 'sourceCheckpoint'].map(key => [key, contract[key]]));
-  const unexpected = Object.keys(process.env).filter(key => !['PATH', 'HOME', 'USERPROFILE', 'TEMP', 'TMP', 'CODEX_HOME', 'TERM', 'COLORTERM', 'FORCE_COLOR'].includes(key));
+  const unexpected = Object.keys(process.env).filter(key => !['PATH', 'HOME', 'USERPROFILE', 'TEMP', 'TMP', 'CODEX_HOME', 'TERM', 'COLORTERM', 'FORCE_COLOR', 'SYSTEMROOT'].includes(key));
   if (unexpected.length) { process.stderr.write(`UNEXPECTED_ENV:${unexpected.join(',')}\n`); process.exit(66); }
+  if (typeof process.env.SYSTEMROOT !== 'string' || !path.isAbsolute(process.env.SYSTEMROOT)) process.exit(66);
   function publish() {
     if (mode === 'missing') return;
     if (mode === 'malformed') { fs.writeFileSync(contract.rootPolicy.resultPath, '{', { flag: 'wx' }); return; }
