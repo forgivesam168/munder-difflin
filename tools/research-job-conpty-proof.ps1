@@ -383,6 +383,7 @@ namespace Munder.Research {
         const uint JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE = 0x00002000;
         const uint EXTENDED_STARTUPINFO_PRESENT = 0x00080000;
         const uint CREATE_UNICODE_ENVIRONMENT = 0x00000400;
+        const uint STARTF_USESTDHANDLES = 0x00000100;
         const uint PROC_THREAD_ATTRIBUTE_PSEUDOCONSOLE = 0x00020016;
         const uint PROC_THREAD_ATTRIBUTE_JOB_LIST = 0x0002000D;
         const uint HANDLE_FLAG_INHERIT = 0x00000001;
@@ -779,6 +780,9 @@ namespace Munder.Research {
 
                 var startup = new StartupInfoEx();
                 startup.StartupInfo.cb = (uint)Marshal.SizeOf(typeof(StartupInfoEx));
+                // Match node-pty's ConPTY launch: null standard handles prevent
+                // the helper's redirected streams from bypassing the pseudoconsole.
+                startup.StartupInfo.dwFlags = STARTF_USESTDHANDLES;
                 startup.lpAttributeList = attributes;
                 var commandLine = new StringBuilder(FixedCommand(executable, fixture, scenario));
                 Check(CreateProcessW(executable, commandLine, IntPtr.Zero, IntPtr.Zero, false,
