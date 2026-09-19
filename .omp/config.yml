@@ -26,7 +26,7 @@ modelRoles:
   # None of these choices is backed by Munder field evidence yet; do not cite them as "the better
   # model". `default` is intentionally absent so Main stays the Human's selection.
   smol: cliproxyapi/deepseek-v4.1-flash:low  # PROVISIONAL — reconnaissance, scout, tiny background work
-  task: cliproxyapi/gpt-5.6-luna:medium      # PROVISIONAL — routine bounded implementation
+  task: cliproxyapi/deepseek-v4.1-flash:low  # PROVISIONAL — routine bounded implementation
   slow: cliproxyapi/kimi-k2.7-code:high      # PROVISIONAL — first review (`reviewer`)
   risk: cliproxyapi/gpt-5.6-sol:high         # PROVISIONAL — second risk review; same model as `deep`
   deep: cliproxyapi/gpt-5.6-sol:high         # PROVISIONAL — escalated implementation
