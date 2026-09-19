@@ -152,6 +152,7 @@ function New-Receipt {
         queryError = & $get 'queryError' $null
         pseudoConsoleClosed = [bool](& $get 'pseudoConsoleClosed' $false)
         ioDrained = [bool](& $get 'ioDrained' $false)
+        drainDiagnostics = & $get 'drainDiagnostics' $null
         cleanupState = $CleanupState
         forcedStop = [bool](& $get 'forcedStop' $false)
         unrelatedProcessTouched = [bool](& $get 'unrelatedProcessTouched' $false)
@@ -326,6 +327,7 @@ namespace Munder.Research {
         public string queryError;
         public bool pseudoConsoleClosed;
         public bool ioDrained;
+        public DrainDiagnostics drainDiagnostics;
         public string cleanupState = "UNKNOWN";
         public bool forcedStop;
         public bool unrelatedProcessTouched;
@@ -343,6 +345,25 @@ namespace Munder.Research {
         public string errorCategory = "NONE";
         public int? errorHResult;
         public int? win32ErrorCode;
+    }
+
+    // Additive observations only; null phase values mean the phase was not sampled.
+    public sealed class DrainDiagnostics {
+        public long bytesRead;
+        public string capturedBytesBase64;
+        public bool captureTruncated;
+        public string terminalReadOutcome;
+        public int? terminalReadError;
+        public bool? descendantMarkerObserved;
+        public string markerBufferPrefix;
+        public int? markerBufferLength;
+        public bool markerBufferTruncated;
+        public bool? completedBeforePseudoConsoleClose;
+        public bool? completedAfterPseudoConsoleClose;
+        public bool? completedBeforeOutputReadClose;
+        public bool? completedAfterOutputReadClose;
+        public bool? waitResult;
+        public bool completedAtSnapshot;
     }
 
     public static class ConptyJobProofNative {
@@ -457,11 +478,65 @@ namespace Munder.Research {
             readonly IntPtr handle;
             readonly object sync = new object();
             readonly StringBuilder text = new StringBuilder();
+            const int CaptureLimit = 64 * 1024;
+            readonly byte[] captured = new byte[CaptureLimit];
+            int capturedCount;
+            long bytesRead;
+            string terminalReadOutcome = "PENDING";
+            int? terminalReadError;
+            bool? descendantMarkerObserved;
+            string markerBufferPrefix;
+            int? markerBufferLength;
+            // Existing matching text remains unchanged; diagnostic copies are bounded.
+            bool ObserveMarker(string marker) {
+                bool found = text.ToString().Contains(marker, StringComparison.Ordinal);
+                if (marker == "DESCENDANT_READY\n") {
+                    descendantMarkerObserved = found;
+                    markerBufferLength = text.Length;
+                    markerBufferPrefix = text.ToString(0, Math.Min(text.Length, CaptureLimit));
+                }
+                return found;
+            }
+            public bool Completed { get { return task != null && task.IsCompleted; } }
+            public void Snapshot(DrainDiagnostics diagnostics) {
+                lock (sync) {
+                    diagnostics.bytesRead = bytesRead;
+                    diagnostics.capturedBytesBase64 = Convert.ToBase64String(captured, 0, capturedCount);
+                    diagnostics.captureTruncated = bytesRead > capturedCount;
+                    diagnostics.terminalReadOutcome = terminalReadOutcome;
+                    diagnostics.terminalReadError = terminalReadError;
+                    diagnostics.descendantMarkerObserved = descendantMarkerObserved;
+                    diagnostics.markerBufferPrefix = markerBufferPrefix;
+                    diagnostics.markerBufferLength = markerBufferLength;
+                    diagnostics.markerBufferTruncated = markerBufferLength > CaptureLimit;
+                    diagnostics.completedAtSnapshot = Completed;
+                }
+            }
             public int? errorCode;
             public Task task;
             public OutputDrain(IntPtr value) { handle = value; }
             public void Start() {
                 task = Task.Factory.StartNew(Read, CancellationToken.None, TaskCreationOptions.LongRunning, TaskScheduler.Default);
+            }
+            void Capture(byte[] buffer, int read) {
+                lock (sync) {
+                    text.Append(Encoding.UTF8.GetString(buffer, 0, read));
+                    int count = Math.Min(read, CaptureLimit - capturedCount);
+                    Buffer.BlockCopy(buffer, 0, captured, capturedCount, count);
+                    capturedCount += count;
+                    bytesRead += read;
+                }
+            }
+            void RecordTerminal(int? error) {
+                lock (sync) {
+                    if (error.HasValue) {
+                        errorCode = error == ERROR_BROKEN_PIPE ? (int?)null : error;
+                        terminalReadError = error;
+                        terminalReadOutcome = error == ERROR_BROKEN_PIPE ? "BROKEN_PIPE" : "ERROR";
+                    } else {
+                        terminalReadOutcome = "ZERO_BYTES";
+                    }
+                }
             }
             void Read() {
                 var buffer = new byte[4096];
@@ -469,20 +544,23 @@ namespace Munder.Research {
                     uint read;
                     if (!ReadFile(handle, buffer, (uint)buffer.Length, out read, IntPtr.Zero)) {
                         int error = Marshal.GetLastWin32Error();
-                        lock (sync) { errorCode = error == ERROR_BROKEN_PIPE ? (int?)null : error; }
+                        RecordTerminal(error);
                         return;
                     }
-                    if (read == 0) return;
-                    lock (sync) { text.Append(Encoding.UTF8.GetString(buffer, 0, (int)read)); }
+                    if (read == 0) {
+                        RecordTerminal(null);
+                        return;
+                    }
+                    Capture(buffer, (int)read);
                 }
             }
             public bool Contains(string marker, int milliseconds) {
                 var watch = System.Diagnostics.Stopwatch.StartNew();
                 while (watch.ElapsedMilliseconds < milliseconds) {
-                    lock (sync) { if (text.ToString().Contains(marker, StringComparison.Ordinal)) return true; }
+                    lock (sync) { if (ObserveMarker(marker)) return true; }
                     Thread.Sleep(20);
                 }
-                lock (sync) { return text.ToString().Contains(marker, StringComparison.Ordinal); }
+                lock (sync) { return ObserveMarker(marker); }
             }
             public bool Wait(int milliseconds) { return task != null && task.Wait(milliseconds); }
         }
@@ -734,15 +812,24 @@ namespace Munder.Research {
                         if (receipt.result == "PASS") receipt.result = "UNKNOWN";
                     }
                 }
+                var diagnostics = drain == null ? null : new DrainDiagnostics();
+                if (diagnostics != null) diagnostics.completedBeforePseudoConsoleClose = drain.Completed;
                 if (pseudoConsole != IntPtr.Zero) {
                     ClosePseudoConsole(pseudoConsole);
                     pseudoConsole = IntPtr.Zero;
                     receipt.pseudoConsoleClosed = true;
                 }
+                if (diagnostics != null) diagnostics.completedAfterPseudoConsoleClose = drain.Completed;
                 CloseOwned(ref inputWrite, ref closeOkay);
+                if (diagnostics != null) diagnostics.completedBeforeOutputReadClose = drain.Completed;
                 CloseOwned(ref outputRead, ref closeOkay);
+                if (diagnostics != null) diagnostics.completedAfterOutputReadClose = drain.Completed;
                 if (drain != null) {
-                    receipt.ioDrained = drain.Wait(3000) && !drain.errorCode.HasValue;
+                    bool waited = drain.Wait(3000);
+                    diagnostics.waitResult = waited;
+                    receipt.ioDrained = waited && !drain.errorCode.HasValue;
+                    drain.Snapshot(diagnostics);
+                    receipt.drainDiagnostics = diagnostics;
                     if (!receipt.ioDrained && receipt.result == "PASS") receipt.result = "UNKNOWN";
                 }
                 if (attributesInitialized) DeleteProcThreadAttributeList(attributes);

@@ -172,11 +172,64 @@ test('all bounded proof cases are represented without enabling retry/recovery/ta
   assert.match(source, /forcedStop/);
 });
 
+test('drain diagnostics are additive, bounded and lossless without relaxing acceptance', () => {
+  assert.match(source, /schemaVersion = 1/);
+  assert.match(source, /drainDiagnostics = & \$get 'drainDiagnostics' \$null/);
+  for (const field of [
+    'bytesRead', 'capturedBytesBase64', 'captureTruncated', 'terminalReadOutcome',
+    'terminalReadError', 'descendantMarkerObserved', 'markerBufferPrefix',
+    'markerBufferLength', 'markerBufferTruncated', 'completedBeforePseudoConsoleClose',
+    'completedAfterPseudoConsoleClose', 'completedBeforeOutputReadClose',
+    'completedAfterOutputReadClose', 'waitResult', 'completedAtSnapshot'
+  ]) assert.match(source, new RegExp(`public [^;\\n]+ ${field};`), field);
+  assert.match(source, /const int CaptureLimit = 64 \* 1024;/);
+  assert.match(source, /new byte\[CaptureLimit\]/);
+  assert.match(source, /Math\.Min\(read, CaptureLimit - capturedCount\)/);
+  assert.match(source, /Convert\.ToBase64String\(captured, 0, capturedCount\)/);
+  assert.match(source, /captureTruncated = bytesRead > capturedCount/);
+  assert.match(source, /text\.ToString\(0, Math\.Min\(text\.Length, CaptureLimit\)\)/);
+  assert.match(source, /markerBufferTruncated = markerBufferLength > CaptureLimit/);
+  assert.match(source, /terminalReadError = error;/);
+  assert.match(source, /terminalReadOutcome = error == ERROR_BROKEN_PIPE \? "BROKEN_PIPE" : "ERROR"/);
+  assert.match(source, /terminalReadOutcome = "ZERO_BYTES"/);
+  assert.match(source, /errorCode = error == ERROR_BROKEN_PIPE \? \(int\?\)null : error/);
+  assert.match(source, /text\.ToString\(\)\.Contains\(marker, StringComparison\.Ordinal\)/);
+  assert.match(source, /descendantObserved = drain\.Contains\("DESCENDANT_READY\\n", 2000\) && active > 0/);
+  assert.match(source, /receipt\.ioDrained = waited && !drain\.errorCode\.HasValue/);
+  assert.match(source, /if \(!receipt\.ioDrained && receipt\.result == "PASS"\) receipt\.result = "UNKNOWN"/);
+});
+
+test('diagnostics sample existing cleanup order without moving handle closure or waits', () => {
+  const cleanup = source.slice(source.indexOf('var diagnostics = drain == null'));
+  const ordered = [
+    'completedBeforePseudoConsoleClose = drain.Completed',
+    'ClosePseudoConsole(pseudoConsole)',
+    'completedAfterPseudoConsoleClose = drain.Completed',
+    'CloseOwned(ref inputWrite, ref closeOkay)',
+    'completedBeforeOutputReadClose = drain.Completed',
+    'CloseOwned(ref outputRead, ref closeOkay)',
+    'completedAfterOutputReadClose = drain.Completed',
+    'bool waited = drain.Wait(3000)',
+    'diagnostics.waitResult = waited',
+    'receipt.ioDrained = waited && !drain.errorCode.HasValue',
+    'drain.Snapshot(diagnostics)',
+    'receipt.drainDiagnostics = diagnostics'
+  ];
+  let previous = -1;
+  for (const token of ordered) {
+    const position = cleanup.indexOf(token);
+    assert.ok(position > previous, token);
+    previous = position;
+  }
+  assert.doesNotMatch(source, /Thread\.Abort|CancelSynchronousIo|CancellationTokenSource/);
+});
+
 test('default path is non-native and does not write a durable receipt', { skip: process.platform !== 'win32' }, () => {
   const result = runPowerShell([]);
   if (result.skipped) return;
   const receipt = receiptFrom(result);
   assert.equal(result.status, 0, result.stderr);
+  assert.equal(receipt.drainDiagnostics, null);
   assert.equal(receipt.nativeExecuted, false);
   assert.equal(receipt.rootCreationSucceeded, false);
   assert.equal(receipt.pseudoConsoleClosed, false);
@@ -193,6 +246,7 @@ test('compile-only path compiles native declarations but never executes proof mo
   if (result.skipped) return;
   const receipt = receiptFrom(result);
   assert.equal(result.status, 0, result.stderr);
+  assert.equal(receipt.drainDiagnostics, null);
   assert.equal(receipt.nativeExecuted, false);
   assert.equal(receipt.rootCreationSucceeded, false);
   assert.equal(receipt.verification, 'PASS');
@@ -213,6 +267,7 @@ test('AdmissionOnly passes fixed input, compile, and environment without native 
     if (result.skipped) return;
     const receipt = receiptFrom(result);
     assert.equal(result.status, 0, result.stderr);
+    assert.equal(receipt.drainDiagnostics, null);
     assert.equal(receipt.admissionResult, 'PASS');
     assert.deepEqual(receipt.admissionChecks, [
       'fixed absolute node and fixture', 'embedded C# compiled', 'bounded environment prepared'
@@ -240,6 +295,7 @@ test('AdmissionOnly invalid input fails before native entry with a specific stag
     ]);
     if (result.skipped) return;
     const receipt = receiptFrom(result);
+    assert.equal(receipt.drainDiagnostics, null);
     assert.equal(result.status, 1);
     assert.equal(receipt.admissionResult, 'FAIL');
     assert.equal(receipt.outerFailureStage, 'native-input-validation');
@@ -262,6 +318,7 @@ test('AdmissionOnly environment failure is distinguished from input failure', { 
     ], { ComSpec: path.join(root, '.tmp', 'missing-comspec.exe') });
     if (result.skipped) return;
     const receipt = receiptFrom(result);
+    assert.equal(receipt.drainDiagnostics, null);
     assert.equal(result.status, 1);
     assert.equal(receipt.admissionResult, 'FAIL');
     assert.equal(receipt.outerFailureStage, 'environment-preparation');
@@ -271,6 +328,87 @@ test('AdmissionOnly environment failure is distinguished from input failure', { 
     assert.equal(receipt.nativeExecutionState, 'NOT_ATTEMPTED');
   } finally {
     if (fs.existsSync(admissionRoot)) fs.rmSync(admissionRoot, { recursive: true, force: false });
+  }
+});
+
+test('shared C# capture and receipt serialization preserve synthetic diagnostic observations', { skip: process.platform !== 'win32' }, () => {
+  const executable = findPowerShell();
+  assert.ok(executable, 'PowerShell required for behavioral diagnostics');
+  // Parse definitions, not the executable script body. No native entry or reader thread.
+  const payload = String.raw`
+$ErrorActionPreference = 'Stop'
+$tokens = $null; $errors = $null
+$ast = [System.Management.Automation.Language.Parser]::ParseFile('${scriptPath.replace(/'/g, "''")}', [ref]$tokens, [ref]$errors)
+if ($errors.Count) { throw 'Harness parse failed' }
+$assignment = @($ast.EndBlock.Statements | Where-Object { $_ -is [System.Management.Automation.Language.AssignmentStatementAst] -and $_.Left.Extent.Text -eq '$nativeSource' })
+if ($assignment.Count -ne 1) { throw 'Expected one embedded source' }
+. ([scriptblock]::Create($assignment[0].Extent.Text))
+Add-Type -TypeDefinition $nativeSource -Language CSharp
+foreach ($name in @('Get-NativeExecutionState','New-Receipt','Write-Receipt')) {
+  $definition = @($ast.EndBlock.Statements | Where-Object { $_ -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $_.Name -eq $name })
+  if ($definition.Count -ne 1) { throw 'Expected exact receipt function' }
+  . ([scriptblock]::Create($definition[0].Extent.Text))
+}
+$Scenario = 'root-early-exit'; $sourceIdentity = $null; $fixtureIdentity = $null
+$type = [Munder.Research.ConptyJobProofNative].GetNestedType('OutputDrain', [Reflection.BindingFlags]::NonPublic)
+$private = [Reflection.BindingFlags]'Instance,NonPublic'
+$marker = "DESCENDANT_READY\n".Replace('\n', [string][char]10)
+$inputBytes = [Text.Encoding]::UTF8.GetBytes("ROOT_EXIT\nDESCENDANT_READY\n".Replace('\n', [string][char]10))
+foreach ($case in @('lf','truncated','error')) {
+  $drain = [Activator]::CreateInstance($type, [object[]]@([IntPtr]::Zero))
+  $bytes = $inputBytes
+  if ($case -eq 'truncated') { $bytes = [Text.Encoding]::UTF8.GetBytes(('x' * 65537)) }
+  $null = $type.GetMethod('Capture',$private).Invoke($drain,[object[]]@($bytes,$bytes.Length))
+  $null = $type.GetMethod('ObserveMarker',$private).Invoke($drain,[object[]]@($marker))
+  $terminal = $null
+  if ($case -eq 'error') { $terminal = 6 }
+  $null = $type.GetMethod('RecordTerminal',$private).Invoke($drain,[object[]]@($terminal))
+  if ($case -ne 'error') { $type.GetField('task').SetValue($drain,[Threading.Tasks.Task]::CompletedTask) }
+  $diagnostics = [Munder.Research.DrainDiagnostics]::new()
+  $diagnostics.completedBeforePseudoConsoleClose = $false
+  $diagnostics.completedAfterPseudoConsoleClose = $true
+  $diagnostics.completedBeforeOutputReadClose = $true
+  $diagnostics.completedAfterOutputReadClose = $true
+  $diagnostics.waitResult = $case -ne 'error'
+  $drain.Snapshot($diagnostics)
+  $native = [Munder.Research.ConptyJobProofReceipt]::new()
+  $native.drainDiagnostics = $diagnostics
+  $receipt = New-Receipt -Result 'UNKNOWN' -CleanupState 'UNKNOWN' -Native $native
+  Write-Receipt -Receipt $receipt
+}
+`;
+  const result = spawnSync(executable, ['-NoProfile', '-NonInteractive', '-EncodedCommand', Buffer.from(payload, 'utf16le').toString('base64')], {
+    cwd: root, env: safePowerShellEnvironment(), encoding: 'utf8', windowsHide: true, timeout: 30000
+  });
+  assert.ifError(result.error);
+  assert.equal(result.status, 0, result.stderr);
+  const receipts = result.stdout.trim().split(/\r?\n/).map(line => JSON.parse(line));
+  assert.equal(receipts.length, 3);
+  const input = Buffer.from('ROOT_EXIT\nDESCENDANT_READY\n');
+  for (const [index, receipt] of receipts.entries()) {
+    assert.equal(receipt.schemaVersion, 1);
+    assert.equal(receipt.result, 'UNKNOWN');
+    assert.equal(receipt.cleanupState, 'UNKNOWN');
+    assert.equal(receipt.nativeExecuted, false);
+    assert.equal(receipt.nativeExecutionState, 'NOT_ATTEMPTED');
+    assert.equal(receipt.descendantObserved, false);
+    const d = receipt.drainDiagnostics;
+    const truncated = index === 1;
+    assert.equal(d.bytesRead, truncated ? 65537 : input.length);
+    assert.deepEqual(Buffer.from(d.capturedBytesBase64, 'base64'), truncated ? Buffer.alloc(65536, 'x') : input);
+    assert.equal(d.captureTruncated, truncated);
+    assert.equal(d.descendantMarkerObserved, !truncated);
+    assert.equal(d.markerBufferPrefix, truncated ? 'x'.repeat(65536) : input.toString('utf8'));
+    assert.equal(d.markerBufferLength, truncated ? 65537 : input.length);
+    assert.equal(d.markerBufferTruncated, truncated);
+    assert.equal(d.terminalReadOutcome, index === 2 ? 'ERROR' : 'ZERO_BYTES');
+    assert.equal(d.terminalReadError, index === 2 ? 6 : null);
+    assert.equal(d.completedBeforePseudoConsoleClose, false);
+    assert.equal(d.completedAfterPseudoConsoleClose, true);
+    assert.equal(d.completedBeforeOutputReadClose, true);
+    assert.equal(d.completedAfterOutputReadClose, true);
+    assert.equal(d.waitResult, index !== 2);
+    assert.equal(d.completedAtSnapshot, index !== 2);
   }
 });
 
