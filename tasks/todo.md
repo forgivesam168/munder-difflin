@@ -1,3 +1,26 @@
+# 2026-09-19 BCH Main-only recovery — BCH_HUMAN_GATE_REQUIRED
+
+本節為最新 handoff；舊紀錄保留。接受的是 local proof-harness 修正，不是 B runtime / native scenario PASS。
+
+- VERIFIED HEAD `17800cb4cddd15fac2a751a365fe6e981a20f4f6`，branch `research/electron-security-poc`；local remote-tracking checkpoint `4bffbd1863d681639a85d22d7327d5b237ea25b9`，未查詢 live remote，未 push。
+- Local-only chain：`d1841798` diagnostic instrumentation → `d097c109` coder routing → `5f19bab2` wait for ConPTY drain before closing reader → `17800cb4` isolate ConPTY child standard handles。
+- Compatibility cohort 五檔仍 5/5 SHA256 MATCH，46 insertions / 20 deletions，unstaged；config 與 HEAD 相同，Main default 未持久化。此 handoff 更新未包含於上述 HEAD。
+- B00001–B00004 preserved。B00004 永久 FAIL：Job final0、root member true、root exit0、descendantObserved=false、ioDrained=false、91 captured bytes、ReadFile ERROR6；markers 位於 helper stdout。
+- B00005（HEAD `5f19bab2`）FAIL：ioDrained=true、BROKEN_PIPE109、無 cancellation/deferred close、Job final0；markers 仍走 helper stdout。
+- B00006（HEAD `17800cb4`）FAIL：102 captured bytes、ROOT_EXIT 已進入 ConPTY且 rootMarkerObserved=true；descendantMarkerObserved=false、ioDrained=true、BROKEN_PIPE109、cancellationAttempts0、outputReadCloseDeferred=false、Job final0、root exit0。helper stdout 不再有裸 fixture markers。
+- Evidence：`.tmp/b1-helper-B0000{4,5,6}/{binding.json,run-evidence.json,stdout.log,stderr.log}` 與 `.tmp/conpty-job-proof-B0000{4,5,6}/proof-receipt.json`。B00005/6 supervisor 皆 exit0、helper exit1、timeout=false、retained final wait=true。所有 FAIL 均未改寫。
+- MAIN_01 hashes：harness `5e0b97f237cdd83f308a4b9adcf0cf62466b42923b71accde31f965f60012106`；test `467402fea9fcfffd3d21259240e600199a266c0ec70a40fbb2c86860b93d0a3f`；cumulative diff vs d1841798 `e2caf353c1a5b49cb6e5565ec7e59f58784628033f71df14189d35a9a2ccc2b0`。
+- MAIN_02 harness `5b0ab15481ededf9f3cba737949cf9a9896b4bd3a4252e3ab7e16cdc1a060c0a`；test 同上；cumulative diff `be8eed006c6dd0d6f8137a0c6c1461d677bee4f973cec983049f2d84dd6ec752`。兩輪 Main freeze 前後/測試後/review後 hashes MATCH。
+- 兩輪分別執行 `node --test test/research-job-conpty-proof.test.cjs`：14 total /14 pass /0 fail /0 skip，exit0，僅 non-native；舊16/16與違規 writer compile/probes不作 acceptance。
+- Main01Review/Main02Review source-level correct；Main01Risk/Main02Risk local proof-fix no blockers。審查不等同 native PASS。Risk result transport 曾 yield schema failure / stream disconnect，以同次分析的 hub 回覆取回，未製造 PASS。First reviewer 要求 precommit native 的誤解已依 Human 明確 postcommit-native 順序澄清。
+- Model routing 未再調整。task/smol DeepSeek、slow Kimi、risk/deep Sol 為 config mapping；Main02Risk transport error明示 `cliproxyapi/gpt-5.6-sol`。其餘 concrete execution identity UNKNOWN，不聲稱全面 independent-model proof。
+- FREEZE_INTEGRITY_FRICTION：前次 developer 宣稱 frozen 後仍寫入，舊 tests/reviews binding INVALID。Human 接受處置。PROMOTE TO PROGRAM INVARIANT：所有 writer terminal / authority結束後，Main核對paths/index/cohort/config並計算files/diff hashes才可freeze；每個test/review/commit gate重核identity；scope內drift→invalidate/refreeze/retest/rereview。
+- TASK_SCOPE_COMPLIANCE_FRICTION：B1ResumeWriter 未經 Task 授權建立/執行/刪除 `.tmp/head-harness.ps1`、`.tmp/head-test.cjs`、`.tmp/probe-b1.ps1`，並自行 validation；工具紀錄反駁其 only-two-files自述。Human分類 TASK_SCOPE_VIOLATION/BOUNDED並接受處置；不得降格為identity drift。三paths不存在/不tracked；先前是否有內容UNKNOWN，不追查。此次修復Main-only且無hand-authored scratch。
+- Future dispatch invariant：分列 PERSISTENT WRITE PATHS、TRANSIENT WRITE PATHS；無transient授權必須 `TRANSIENT WRITE PATHS = NONE`。Temporary creation/deletion亦是寫入；self-report不是證據。未建立hook/plugin/custom bus。
+- B：只有bounded synthetic Job/root/drain部分證據；production wiring未開始，runtimeReady不得升READY。C未開始；A frozen，R deferred。31 criteria原文未變，不宣稱company readiness。
+- Re-plan / Human gate：B00004–B00006三次native evidence cycles已用完，descendant I/O仍UNKNOWN。INFERENCE：fixture `detached:true` child的console/stdio語義是下一調查邊界；不得直接取消detached（既有lesson指出libuv parent-exit Job可殺descendant）。需Human授權新的bounded fixture/descendant-I/O調查與fresh run envelope；未執行B00007，未修改fixture。
+- 下一決定：是否授權新scope包含 `test/fixtures/research-job-conpty-child.cjs`，保留creation-time Job、root-early-exit存活descendant、no provider network/credentials與嚴格marker acceptance，最多新的明確run數。不得用缺失marker仍PASS作替代。
+
 # A milestone closure — CLOSED_ENOUGH_TO_ENTER_B
 
 - A1 FINAL CLOSURE = PASS 且 FROZEN；A1 native acceptance obligation 已 COMPLETE。
