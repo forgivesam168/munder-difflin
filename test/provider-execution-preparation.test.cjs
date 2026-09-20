@@ -78,6 +78,8 @@ test('exact task bytes refuse schema, substitution, invalid UTF-8 and over-budge
     { contract: { ...f.contract, runId: 'stale' }, task: { encoding: 'utf8', text: f.text } } ])
     assert.throws(() => api.readProviderTaskDocument(Buffer.from(JSON.stringify(document)), f.contract));
   assert.throws(() => api.readProviderTaskDocument(Buffer.from([0xff]), f.contract), /UTF-8/);
+  const boundary = fixture('é'.repeat(api.MAX_PROVIDER_TASK_BYTES / 2));
+  assert.deepEqual(api.readProviderTaskDocument(boundary.request, boundary.contract), Buffer.from(boundary.text));
   assert.throws(() => fixture('x'.repeat(api.MAX_PROVIDER_TASK_BYTES + 1)), /size/);
   assert.throws(() => api.consumeProviderExecutionPreparation(f.preparation, f.contract, Buffer.concat([f.request, Buffer.from(' ')]), {}, f.network), /substitution/);
   assert.deepEqual(api.describeProviderTaskTransport(f.preparation, f.contract), {
@@ -156,4 +158,58 @@ test('synthetic provenance and network capabilities cannot be copied, substitute
     assert.throws(() => JSON.stringify(value), error => !error.message.includes('INERT_NON_SECRET_CREDENTIAL') && /not serializable/.test(error.message));
   }
   assert.equal(JSON.stringify({ evidence, descriptor, consumed }).includes('INERT_NON_SECRET_CREDENTIAL'), false);
+});
+
+test('credential activation acquires once, exposes no material and disposes idempotently', () => {
+  const f = fixture();
+  const lease = api.acquireInertProviderCredential(f.preparation, f.contract);
+  assert.equal(lease.disposition, 'INERT_NON_SECRET');
+  assert.equal(lease.scopeDigest, api.providerCredentialScopeDigest(f.contract));
+  assert.equal(lease.disposed, false);
+  assert.equal(JSON.stringify(lease).includes('INERT_NON_SECRET_CREDENTIAL'), false);
+  assert.throws(() => api.acquireInertProviderCredential(f.preparation, f.contract), /spent/);
+  lease.dispose();
+  assert.equal(lease.disposed, true);
+  lease.dispose();
+  assert.equal(lease.disposed, true);
+  const revoked = fixture();
+  const acquired = api.acquireInertProviderCredential(revoked.preparation, revoked.contract);
+  revoked.issuer.revoke(revoked.credential);
+  assert.equal(acquired.disposed, true);
+});
+
+test('expired and revoked preparations cannot acquire inert material', () => {
+  const f = fixture();
+  const now = Date.now;
+  try {
+    Date.now = () => f.expiresAt;
+    assert.throws(() => api.acquireInertProviderCredential(f.preparation, f.contract), /expired/);
+  } finally { Date.now = now; }
+  const revoked = fixture();
+  revoked.issuer.revoke(revoked.credential);
+  assert.throws(() => api.acquireInertProviderCredential(revoked.preparation, revoked.contract), /Revoked/);
+});
+
+test('descriptor provenance and digest refuse copies, foreign identities and endpoint substitution', () => {
+  const f = fixture();
+  const evidence = api.providerExecutionEvidence(f.preparation, f.contract);
+  const check = candidate => api.assertProviderBackendEvidence(f.preparation, f.contract, candidate);
+  check(evidence);
+  for (const candidate of [
+    { ...evidence, backendDescriptor: { ...evidence.backendDescriptor } },
+    { ...evidence, backendDescriptorDigest: '0'.repeat(64) },
+    api.providerExecutionEvidence(fixture().preparation, f.contract),
+    { ...evidence, endpoint: 'https://other.invalid' }
+  ]) assert.throws(() => check(candidate), /substitution/);
+  const issuer = api.createProviderExecutionIssuer();
+  const authorization = { ...f.authorization, endpointOrigin: 'https://other.invalid' };
+  const credential = issuer.mintCredential(f.contract, authorization,
+    issuer.createSyntheticProvenance(f.contract, f.expiresAt));
+  const preparation = issuer.prepare(f.contract, credential,
+    issuer.mintTask(f.contract, f.request, f.expiresAt), authorization.endpointOrigin);
+  assert.notEqual(api.providerExecutionEvidence(preparation, f.contract).backendDescriptorDigest,
+    evidence.backendDescriptorDigest);
+  for (const env of [{ HTTPS_PROXY: 'https://other.invalid' }, { OPENAI_API_KEY: 'inert' }])
+    assert.throws(() => api.consumeProviderExecutionPreparation(f.preparation, f.contract, f.request, env, f.network), /environment refused/);
+  api.assertProviderExecutionPreparation(f.preparation, f.contract);
 });

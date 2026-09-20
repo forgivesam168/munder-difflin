@@ -28,7 +28,7 @@ import {
 import { buildCodexWorkerEnv, validateCodexWorkerEnv, type CodexWorkerEnvironmentInput } from './ptyEnv';
 import type { OwnedPtyLaunch, OwnedPtyReceipt } from './windowsOwnedPty';
 import { consumeProviderWorkerBridge } from './providerWorker';
-import { assertNoProviderSecretContent, consumeProviderExecutionPreparation, readProviderTaskDocument, type ProviderExecutionEvidence } from './providerExecutionPreparation';
+import { assertNoProviderSecretContent, bindProviderBackendLaunch, consumeProviderExecutionPreparation, readProviderTaskDocument, type ProviderExecutionEvidence } from './providerExecutionPreparation';
 
 /** Host acceptance receipt schema, written once per accepted identity. */
 export const BOUNDED_WORKER_ACCEPTANCE_VERSION = 1 as const;
@@ -239,6 +239,7 @@ export interface PreparedBoundedWorker {
    * identities and the timeout/cleanup bounds cannot be swapped by a later caller.
    */
   readonly launch: OwnedPtyLaunch;
+  readonly providerEvidence?: ProviderExecutionEvidence;
   /** Binds identity + request digest + argv + executable/script/helper/native digests + root + env + bounds. */
   readonly bindingDigest: string;
   readonly admission: ProviderFreeAdmission | AdmissionDecision;
@@ -667,7 +668,7 @@ export function prepareBoundedWorker(permit: BoundedWorkerPermit, providerBridge
     throw new Error('Bounded worker fixture files must live outside the worker-writable synthetic root');
   }
   const requestPath = assertApprovedLocalPath(permit.requestPath, 'Bounded worker request document');
-  const args = provider ? provider.launch.args : readApprovedArgv(permit.argv, scriptPath, requestPath, mode);
+  const args = provider ? bridge!.evidence.backendDescriptor.args : readApprovedArgv(permit.argv, scriptPath, requestPath, mode);
   assertApprovedFileDigest(executablePath, 'Bounded worker fixture executable', executableSha256, MAX_APPROVED_FILE_BYTES);
   assertApprovedFileDigest(scriptPath, 'Bounded worker fixture script', scriptSha256, MAX_APPROVED_FILE_BYTES);
   const requestDocument = assertApprovedRequestFile(requestPath, requestSha256, syntheticRoot);
@@ -718,10 +719,13 @@ export function prepareBoundedWorker(permit: BoundedWorkerPermit, providerBridge
       throw new Error('Provider bridge does not match bounded identity, environment, argv, backend or authority');
     }
   }
-  const launch: OwnedPtyLaunch = Object.freeze({
+  let launch: OwnedPtyLaunch = Object.freeze({
     ...backend, executablePath, executableSha256: contract.executable.executableSha256,
     args, cwd: rootPolicy.workDir, env, ioMode: provider ? 'RAW_PIPE' : 'CONPTY'
   });
+  const providerEvidence = provider
+    ? bindProviderBackendLaunch(bridge!.execution, contract, bridge!.evidence, launch) : undefined;
+  if (providerEvidence) launch = providerEvidence.backendDescriptor.launch!;
 
   const binding = {
     version: BOUNDED_WORKER_ACCEPTANCE_VERSION, permitId, requestPath, requestSha256,
@@ -731,7 +735,7 @@ export function prepareBoundedWorker(permit: BoundedWorkerPermit, providerBridge
     scriptPath, scriptSha256, mode, argv: args,
     cwd: rootPolicy.workDir, env, syntheticRoot, resultPath: rootPolicy.resultPath, artifactDir: rootPolicy.artifactDir,
     hostReceiptDir, limits, backend,
-    ...(provider ? { providerAdmission: provider.admission, providerEvidence: bridge!.evidence, ioMode: 'RAW_PIPE', launchAuthority: 'AUTHORIZED', expiresAt: bridge!.expiresAt } : {})
+    ...(provider ? { providerAdmission: provider.admission, providerEvidence, ioMode: 'RAW_PIPE', launchAuthority: 'INERT_ONLY', expiresAt: bridge!.expiresAt } : {})
   };
   const bindingDigest = createHash('sha256').update(JSON.stringify(binding), 'utf8').digest('hex');
   const receiptPath = join(hostReceiptDir, `bounded-worker-${bindingDigest}.json`);
@@ -745,7 +749,7 @@ export function prepareBoundedWorker(permit: BoundedWorkerPermit, providerBridge
   const state: PreparedState = {
     expiresAt: permit.expiresAt, bindingDigest, permitId, contract, limits,
     providerExecution: bridge?.execution, providerNetworkAuthority: bridge?.networkAuthority, env, published: false,
-    providerEvidence: bridge?.evidence,
+    providerEvidence,
     taskInput: provider ? readProviderTaskDocument(requestDocument, contract) : undefined,
     requestPath, syntheticRoot, resultPath: rootPolicy.resultPath, artifactDir: rootPolicy.artifactDir,
     receiptPath,
@@ -763,7 +767,7 @@ export function prepareBoundedWorker(permit: BoundedWorkerPermit, providerBridge
     launched: false, accepted: false
   };
   const prepared: PreparedBoundedWorker = Object.freeze({
-    permitId, contract, executablePath, args, cwd: rootPolicy.workDir, env, launch, bindingDigest, admission,
+    permitId, contract, executablePath, args, cwd: rootPolicy.workDir, env, launch, bindingDigest, admission, providerEvidence,
     accept: (receipt: OwnedPtyReceipt): BoundedWorkerAcceptance => acceptBoundedWorkerResult(prepared, receipt)
   });
   MINTED.set(prepared, state);
@@ -809,7 +813,7 @@ function assertLaunchPreconditions(state: PreparedState): void {
   if (existsSync(state.resultPath)) throw new Error('Bounded worker durable result slot must be empty before launch');
   if (existsSync(state.receiptPath)) throw new Error('Bounded worker acceptance already exists for this binding');
   if (state.providerExecution !== undefined) {
-    consumeProviderExecutionPreparation(state.providerExecution, state.contract, requestBytes, state.env, state.providerNetworkAuthority);
+    consumeProviderExecutionPreparation(state.providerExecution, state.contract, requestBytes, state.env, state.providerNetworkAuthority, state.providerEvidence);
   }
 }
 
@@ -837,12 +841,46 @@ export function deliverPreparedProviderInput(value: unknown, transport: { input(
   finally { bytes.fill(0); }
 }
 
+const STRUCTURED_COMPLETIONS = new WeakMap<object, { prepared: PreparedBoundedWorker; result: CodexTaskResult }>();
+const ACTIVE_COMPLETION = Object.freeze({});
+
+/** Explicit fixture-only event source. Real Codex recognition remains UNKNOWN, with no output parser. */
+export function createInertProviderCompletionSource(prepared: PreparedBoundedWorker) {
+  assertPreparedBoundedWorker(prepared);
+  let minted = false;
+  return Object.freeze({
+    complete(result: unknown): object {
+      if (prepared.providerEvidence && prepared.providerEvidence.backendDescriptor.disposition !== 'PROVIDER_FREE_INERT')
+        throw new Error('Real provider completion recognition is UNKNOWN');
+      const state = MINTED.get(prepared)!;
+      if (minted || !state.launched || state.accepted || state.published) throw new Error('Structured completion source is not live');
+      assertNoProviderSecretContent(result);
+      const snapshot = validateTaskResult(JSON.parse(JSON.stringify(result)), state.contract, { resultAlreadyExists: false });
+      const event = Object.freeze({});
+      STRUCTURED_COMPLETIONS.set(event, { prepared, result: snapshot });
+      minted = true;
+      return event;
+    }
+  });
+}
+
+/** Event identity, not a caller result or terminal observation, authorizes publication. */
+export function publishRecognizedProviderCompletion(prepared: PreparedBoundedWorker, event: unknown): void {
+  assertPreparedBoundedWorker(prepared);
+  const completion = event && typeof event === 'object' ? STRUCTURED_COMPLETIONS.get(event) : undefined;
+  if (!completion || completion.prepared !== prepared) throw new Error('Missing recognized structured completion capability');
+  STRUCTURED_COMPLETIONS.delete(event as object);
+  publishBoundedWorkerTaskResult(prepared, completion.result, ACTIVE_COMPLETION);
+}
+
 /** Trusted Main adapter only: terminal text and exit callbacks never call this publisher.
  * Existing acceptance remains the sole artifact-verification and receipt authority. */
-export function publishBoundedWorkerTaskResult(prepared: unknown, value: unknown): void {
+export function publishBoundedWorkerTaskResult(prepared: unknown, value: unknown, completion?: unknown): void {
   assertPreparedBoundedWorker(prepared);
   const state = MINTED.get(prepared)!;
   if (!state.launched || state.accepted || state.published) throw new Error('Result publication is not live or was already consumed');
+  if (state.providerExecution !== undefined && completion !== ACTIVE_COMPLETION)
+    throw new Error('Missing recognized structured completion capability');
   // Lifecycle/duplicate rejection is a pure state observation and runs before any parsing or
   // content scanning, so a second publication reports the duplicate rather than a content refusal.
   if (existsSync(state.resultPath)) throw new Error('Duplicate task result');

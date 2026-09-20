@@ -1,5 +1,6 @@
 import { createHash } from 'node:crypto';
 import { isCredentialLikeEnvironmentKey, type CodexWorkerContract } from './codexWorkerContract';
+import type { OwnedPtyLaunch } from './windowsOwnedPty';
 
 /** Main-only preparation metadata. No secret backend or network permission exists here. */
 export const MAX_PROVIDER_TASK_BYTES = 65_536;
@@ -89,11 +90,11 @@ function opaqueCapability(): object {
     value: () => { throw new Error('Preparation authority is not serializable'); }
   }));
 }
-interface CredentialState { binding: string; authorization: Readonly<ProviderCredentialAuthorization>; material: Buffer; expiresAt: number; revoked: boolean; spent: boolean }
+interface CredentialState { binding: string; authorization: Readonly<ProviderCredentialAuthorization>; material: Buffer; expiresAt: number; revoked: boolean; spent: boolean; disposed: boolean }
 interface TaskState { binding: string; expiresAt: number; requestDigest: string; taskBytes: number; spent: boolean }
 const credentials = new WeakMap<object, CredentialState>();
 const tasks = new WeakMap<object, TaskState>();
-const preparations = new WeakMap<object, { contract: CodexWorkerContract; credential: object; task: object; endpoint: ProviderEndpointPolicy }>();
+const preparations = new WeakMap<object, { contract: CodexWorkerContract; credential: object; task: object; endpoint: ProviderEndpointPolicy; descriptor?: ProviderBackendDescriptor }>();
 interface NetworkState { preparation: object; scope: string; expiresAt: number; spent: boolean; revoked: boolean }
 const networks = new WeakMap<object, NetworkState>();
 function stateOf<T>(map: WeakMap<object, T>, value: unknown): T {
@@ -125,7 +126,7 @@ export function createProviderExecutionIssuer() {
       prepareProviderEndpoint(authorization.endpointOrigin);
       const handle = opaqueCapability();
       credentials.set(handle, { binding: binding(contract), authorization: Object.freeze({ ...authorization }),
-        material: Buffer.from('INERT_NON_SECRET_CREDENTIAL', 'ascii'), expiresAt: authorization.expiresAt, revoked: false, spent: false });
+        material: Buffer.from('INERT_NON_SECRET_CREDENTIAL', 'ascii'), expiresAt: authorization.expiresAt, revoked: false, spent: false, disposed: false });
       source.spent = true;
       owned.add(handle);
       return handle;
@@ -133,7 +134,7 @@ export function createProviderExecutionIssuer() {
     revoke(handle: object): void {
       if (!owned.has(handle)) throw new Error('Foreign credential authority');
       const credential = stateOf(credentials, handle);
-      credential.material.fill(0);
+      disposeCredential(credential);
       credential.revoked = true;
     },
     mintTask(contract: CodexWorkerContract, request: Buffer, expiresAt: number): object {
@@ -172,6 +173,7 @@ export function assertProviderExecutionPreparation(value: unknown, contract: Cod
   const preparation = stateOf(preparations, value);
   const credential = stateOf(credentials, preparation.credential);
   const task = stateOf(tasks, preparation.task);
+  if (Date.now() >= credential.expiresAt) disposeCredential(credential);
   expiry(credential.expiresAt); expiry(task.expiresAt);
   if (credential.authorization.scopeDigest !== providerCredentialScopeDigest(contract)
     || credential.authorization.endpointOrigin !== preparation.endpoint.origin) throw new Error('Conflicting synthetic authorization scope');
@@ -180,13 +182,35 @@ export function assertProviderExecutionPreparation(value: unknown, contract: Cod
     throw new Error('Revoked, spent or conflicting preparation authority');
 }
 
+function disposeCredential(credential: CredentialState): void {
+  if (credential.disposed) return;
+  credential.material.fill(0);
+  credential.disposed = true;
+}
+
+/** Stable inert acquisition lease: never returns bytes or consults host authentication. */
+export function acquireInertProviderCredential(value: unknown, contract: CodexWorkerContract) {
+  assertProviderExecutionPreparation(value, contract);
+  const credential = stateOf(credentials, stateOf(preparations, value).credential);
+  credential.spent = true;
+  return Object.freeze({
+    disposition: 'INERT_NON_SECRET' as const,
+    scopeDigest: credential.authorization.scopeDigest,
+    recordId: credential.authorization.recordId,
+    get disposed(): boolean { return credential.disposed; },
+    dispose(): void { disposeCredential(credential); }
+  });
+}
+
 export interface ProviderBackendDescriptor {
   readonly schema: 'PROVIDER_BACKEND'; readonly version: 1;
   readonly disposition: 'PROVIDER_FREE_INERT'; readonly shell: false;
   readonly args: readonly string[]; readonly endpoint: ProviderEndpointPolicy; readonly codexHome: string;
   readonly framing: 'EXACT_BYTES_THEN_EOF'; readonly ioMode: 'RAW_PIPE';
   readonly credentialDisposition: 'SYNTHETIC_ONLY';
-  readonly configurationUse: 'EVIDENCE_ONLY_NOT_APPLIED_TO_INERT_EXECUTABLE'; readonly providerCliProof: 'NOT_RUN';
+  readonly configurationUse: 'BOUND_DESCRIPTOR_INERT_ONLY'; readonly providerCliProof: 'NOT_RUN';
+  readonly launch?: OwnedPtyLaunch;
+  readonly scopeDigest: string;
 }
 export interface ProviderExecutionEvidence {
   readonly schema: 'PROVIDER_EXECUTION'; readonly version: 1;
@@ -220,31 +244,65 @@ export function assertProviderNetworkAuthority(value: unknown, preparation: unkn
 }
 export function describeProviderBackend(value: unknown, contract: CodexWorkerContract): ProviderBackendDescriptor {
   assertProviderExecutionPreparation(value, contract);
-  const { endpoint } = stateOf(preparations, value);
+  const preparation = stateOf(preparations, value);
+  if (preparation.descriptor) return preparation.descriptor;
+  const { endpoint } = preparation;
   const args = Object.freeze(['--ignore-user-config', '--ask-for-approval', 'never', '--sandbox', 'workspace-write',
     '-c', 'model_provider="munder"', '-c', 'model_providers.munder.name="Munder"',
     '-c', `model_providers.munder.base_url=${JSON.stringify(endpoint.origin + '/v1')}`,
     '-c', 'model_providers.munder.wire_api="responses"', 'exec', '-']);
-  return Object.freeze({ schema: 'PROVIDER_BACKEND', version: 1, disposition: 'PROVIDER_FREE_INERT',
+  preparation.descriptor = Object.freeze({ schema: 'PROVIDER_BACKEND', version: 1, disposition: 'PROVIDER_FREE_INERT',
     shell: false, args, endpoint, codexHome: contract.rootPolicy.codexHomeDir,
     framing: 'EXACT_BYTES_THEN_EOF', ioMode: 'RAW_PIPE', credentialDisposition: 'SYNTHETIC_ONLY',
-    configurationUse: 'EVIDENCE_ONLY_NOT_APPLIED_TO_INERT_EXECUTABLE', providerCliProof: 'NOT_RUN' } as const);
+    scopeDigest: providerCredentialScopeDigest(contract),
+    configurationUse: 'BOUND_DESCRIPTOR_INERT_ONLY', providerCliProof: 'NOT_RUN' } as const);
+  return preparation.descriptor;
+}
+
+/** Called only after the bounded consumer has verified executable, roots, env and backend bounds. */
+export function bindProviderBackendLaunch(value: unknown, contract: CodexWorkerContract,
+  evidence: ProviderExecutionEvidence, launch: OwnedPtyLaunch): ProviderExecutionEvidence {
+  assertProviderBackendEvidence(value, contract, evidence);
+  const state = stateOf(preparations, value);
+  const descriptor = evidence.backendDescriptor;
+  if (descriptor.launch) throw new Error('Provider descriptor launch already bound');
+  enforceProviderEndpoint(descriptor.endpoint, descriptor.endpoint.origin, launch.env);
+  if (launch.executablePath !== contract.executable.executablePath
+    || launch.executableSha256 !== contract.executable.executableSha256
+    || launch.cwd !== contract.rootPolicy.workDir || launch.env.CODEX_HOME !== descriptor.codexHome
+    || launch.ioMode !== 'RAW_PIPE' || JSON.stringify(launch.args) !== JSON.stringify(descriptor.args))
+    throw new Error('Provider descriptor launch substitution');
+  const launchSnapshot = Object.freeze({ ...launch, args: descriptor.args,
+    env: Object.freeze({ ...launch.env }), helperEnv: Object.freeze({ ...launch.helperEnv }) });
+  state.descriptor = Object.freeze({ ...descriptor, launch: launchSnapshot });
+  return providerExecutionEvidence(value, contract);
+}
+
+export function assertProviderBackendEvidence(value: unknown, contract: CodexWorkerContract,
+  evidence: ProviderExecutionEvidence): void {
+  const descriptor = describeProviderBackend(value, contract);
+  if (evidence.backendDescriptor !== descriptor
+    || evidence.backendDescriptorDigest !== digest(Buffer.from(JSON.stringify(descriptor)))
+    || JSON.stringify(evidence) !== JSON.stringify(providerExecutionEvidence(value, contract)))
+    throw new Error('Provider descriptor or evidence substitution');
 }
 export function consumeProviderExecutionPreparation(value: unknown, contract: CodexWorkerContract,
-  request: Buffer, env: Readonly<Record<string, string>>, networkAuthority?: unknown) {
+  request: Buffer, env: Readonly<Record<string, string>>, networkAuthority?: unknown, evidence?: ProviderExecutionEvidence) {
   assertProviderExecutionPreparation(value, contract);
   assertProviderNetworkAuthority(networkAuthority, value, contract);
+  if (evidence) assertProviderBackendEvidence(value, contract, evidence);
   const preparation = stateOf(preparations, value);
-  const credential = stateOf(credentials, preparation.credential);
   const task = stateOf(tasks, preparation.task);
   if (digest(request) !== task.requestDigest) throw new Error('Task request substitution');
   const taskBytes = readProviderTaskDocument(request, contract);
   enforceProviderEndpoint(preparation.endpoint, preparation.endpoint.origin, env);
   const descriptor = describeProviderBackend(value, contract);
+  if (descriptor.launch && (!evidence || JSON.stringify(env) !== JSON.stringify(descriptor.launch.env)))
+    throw new Error('Provider launch evidence or environment substitution');
   // Strings are immutable; consumers recreate the exact UTF-8 bytes without exposing credential material.
   const consumed = Object.freeze({ descriptor, taskText: taskBytes.toString('utf8'), taskDigest: contract.taskDigest });
-  credential.material.fill(0);
-  credential.spent = true;
+  const lease = acquireInertProviderCredential(value, contract);
+  lease.dispose();
   task.spent = true;
   stateOf(networks, networkAuthority).spent = true;
   return consumed;

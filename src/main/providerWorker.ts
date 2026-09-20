@@ -29,7 +29,7 @@ import {
 } from './codexWorkerContract';
 import { buildCodexWorkerEnv, validateCodexWorkerEnv, type CodexWorkerEnvironmentInput } from './ptyEnv';
 import { buildCodexWorkerLaunch, type CodexWorkerLaunch } from './workerLaunch';
-import { assertPreparedBoundedWorker, prepareBoundedWorker, publishBoundedWorkerTaskResult, type BoundedWorkerPermit, type PreparedBoundedWorker } from './boundedWorker';
+import { assertPreparedBoundedWorker, prepareBoundedWorker, publishBoundedWorkerTaskResult, publishRecognizedProviderCompletion, type BoundedWorkerPermit, type PreparedBoundedWorker } from './boundedWorker';
 import { assertProviderExecutionPreparation, assertProviderNetworkAuthority, providerExecutionEvidence, type ProviderExecutionEvidence } from './providerExecutionPreparation';
 
 export const PROVIDER_PREFLIGHT_SCHEMA_VERSION = 1 as const;
@@ -274,20 +274,9 @@ export function createProviderTaskResultAdapter(prepared: PreparedBoundedWorker)
 
 /** Separate recognized structured-completion capability; terminal output and exit have no issuer. */
 export function createRecognizedProviderCompletionIssuer(prepared: PreparedBoundedWorker) {
-  const adapter = createProviderTaskResultAdapter(prepared);
-  const capabilities = new WeakSet<object>();
+  assertPreparedBoundedWorker(prepared);
   return Object.freeze({
-    recognizeStructuredCompletion(): object {
-      const capability = Object.freeze({});
-      capabilities.add(capability);
-      return capability;
-    },
-    publish(capability: unknown, result: unknown): void {
-      if (!capability || typeof capability !== 'object' || !capabilities.has(capability))
-        throw new Error('Missing recognized structured completion capability');
-      adapter.publish(result);
-      capabilities.delete(capability);
-    }
+    publish(event: unknown): void { publishRecognizedProviderCompletion(prepared, event); }
   });
 }
 

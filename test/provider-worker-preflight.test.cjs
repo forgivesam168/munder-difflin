@@ -987,7 +987,17 @@ test('the production bridge reaches a minted PreparedBoundedWorker with zero inv
   assert.equal(prepared.contract.executable.executableSha256, localExecutable.executableSha256);
 
   // Fixed launch, explicit environment, and the bound owned-runtime backend.
-  assert.deepEqual(prepared.args, [...CODEX_WORKER_ARGV]);
+  assert.deepEqual(prepared.args, prepared.providerEvidence.backendDescriptor.args);
+  assert.notDeepEqual(prepared.args, [...CODEX_WORKER_ARGV]);
+  assert.equal(prepared.providerEvidence.backendDescriptor.launch, prepared.launch);
+  assert.deepEqual(prepared.launch.args, prepared.providerEvidence.backendDescriptor.args);
+  assert.equal(prepared.providerEvidence.backendDescriptorDigest,
+    crypto.createHash('sha256').update(JSON.stringify(prepared.providerEvidence.backendDescriptor)).digest('hex'));
+  assert.equal(prepared.providerEvidence.backendDescriptor.shell, false);
+  assert.equal(prepared.launch.ioMode, 'RAW_PIPE');
+  assert.equal(prepared.providerEvidence.backendDescriptor.codexHome, prepared.env.CODEX_HOME);
+  assert.equal(prepared.providerEvidence.backendDescriptor.scopeDigest,
+    executionApi.providerCredentialScopeDigest(prepared.contract));
   assert.equal(prepared.cwd, localContract.rootPolicy.workDir);
   assert.deepEqual(Object.keys(prepared.env), [...CODEX_ENV_ALLOWLIST]);
   assert.equal(prepared.env.HOME, localContract.rootPolicy.homeDir);
@@ -1055,6 +1065,18 @@ test('the production bridge reaches a minted PreparedBoundedWorker with zero inv
     assert.throws(() => bounded.consumePreparedBoundedWorker(prepared), /already been consumed for launch/);
   });
   assert.deepEqual(consumption.attempts, []);
+  const input = [];
+  bounded.deliverPreparedProviderInput(prepared, {
+    input(bytes) { input.push(Buffer.from(bytes)); }, closeInput() { input.push('EOF'); }
+  });
+  assert.deepEqual(input, [Buffer.from('p-bridge-local-mocked-ready'), 'EOF']);
+  assert.throws(() => bounded.deliverPreparedProviderInput(prepared, { input() {}, closeInput() {} }), /not live/);
+  for (const output of ['PASS', 0, { result: 'PASS' }])
+    assert.throws(() => preflightApi.createProviderTaskResultAdapter(prepared).publish(output), /structured completion/);
+  assert.throws(() => bounded.publishBoundedWorkerTaskResult(prepared, { result: 'PASS' }, {}), /structured completion/);
+  const providerCompletion = preflightApi.createRecognizedProviderCompletionIssuer(prepared);
+  for (const observation of [{ result: 'PASS' }, 'PASS', 0, { exitCode: 0 }])
+    assert.throws(() => providerCompletion.publish(observation), /Missing recognized/);
 
   // The trusted adapter also accepts the real local provider-free preparation seam.
   // Consumption is a lifecycle transition only: no native launch is performed.
@@ -1071,11 +1093,13 @@ test('the production bridge reaches a minted PreparedBoundedWorker with zero inv
   assert.throws(() => adapter.publish(result), /not live/);
   bounded.consumePreparedBoundedWorker(free);
   const recognized = preflightApi.createRecognizedProviderCompletionIssuer(free);
-  const completion = recognized.recognizeStructuredCompletion();
-  for (const fake of [{}, { ...completion }, JSON.parse(JSON.stringify(completion)),
-    preflightApi.createRecognizedProviderCompletionIssuer(free).recognizeStructuredCompletion()])
-    assert.throws(() => recognized.publish(fake, result), /Missing recognized/);
-  for (const output of ['PASS', 0]) assert.throws(() => recognized.publish(completion, output));
+  const source = bounded.createInertProviderCompletionSource(free);
+  for (const output of ['PASS', 0, { result: 'PASS' }]) assert.throws(() => source.complete(output));
+  const completion = source.complete(result);
+  assert.throws(() => source.complete(result), /not live/);
+  for (const fake of [{}, { ...completion }, JSON.parse(JSON.stringify(completion)), 'PASS', 0])
+    assert.throws(() => recognized.publish(fake), /Missing recognized/);
+  assert.throws(() => preflightApi.createRecognizedProviderCompletionIssuer(prepared).publish(completion), /Missing recognized/);
   assert.equal(fs.existsSync(free.contract.resultPolicy.resultPath), false);
   for (const invalid of [{ ...result, runId: 'stale' },
     { ...result, checks: { mechanics: 'FAIL' } },
@@ -1090,8 +1114,8 @@ test('the production bridge reaches a minted PreparedBoundedWorker with zero inv
     assert.throws(() => adapter.publish(result), /synthetic publication failure/);
   } finally { fs.linkSync = originalLink; }
   assert.equal(fs.existsSync(free.contract.resultPolicy.resultPath), false);
-  recognized.publish(completion, result);
-  assert.throws(() => recognized.publish(completion, result), /Missing recognized/);
+  recognized.publish(completion);
+  assert.throws(() => recognized.publish(completion), /Missing recognized/);
   const canonical = contractApi.validateTaskResult(result, free.contract, { resultAlreadyExists: false });
   assert.equal(fs.readFileSync(free.contract.resultPolicy.resultPath, 'utf8'), `${JSON.stringify(canonical, null, 2)}\n`);
   assert.throws(() => adapter.publish(result), /already consumed/);
