@@ -25,12 +25,13 @@ test('same Core result and once-only authority semantics cover distinct inert Co
   assert.equal('codexHomeDir' in codex.core.rootPolicy, false);
   assert.equal('executable' in codex.core, false);
   assert.equal(codex.adapter.config.environmentKey, 'CODEX_HOME');
-  assert.equal(omp.adapter.config.environmentKey, 'UNKNOWN');
-  assert.equal(omp.adapter.args, null);
+  assert.equal(omp.adapter.config.environmentKey, 'PI_CODING_AGENT_DIR');
+  assert.deepEqual(omp.adapter.args, ['--print', '--mode', 'json', '--no-session', '--cwd', omp.core.rootPolicy.workDir,
+    '--model', 'cliproxyapi/independent-model', '--thinking', 'high', '--approval-mode', 'yolo', '--max-time', '60s']);
   assert.equal(omp.adapter.thinkingLevel, 'high');
-  assert.equal(omp.adapter.taskDelivery, 'UNKNOWN');
-  assert.equal(omp.adapter.approval, 'UNKNOWN');
-  assert.equal(omp.adapter.session, 'FRESH_REQUIRED_SYNTAX_UNKNOWN');
+  assert.equal(omp.adapter.taskDelivery, 'RAW_PIPE_EXACT_BYTES_THEN_EOF');
+  assert.equal(omp.adapter.approval, 'YOLO_TOOL_POLICIES_STILL_APPLY');
+  assert.equal(omp.adapter.session, 'EPHEMERAL_IN_MEMORY');
   assert.deepEqual(codex.adapter.args.slice(-2), ['exec', '-']);
   assert.ok(codex.adapter.args.includes('independent-model'));
   assert.equal(codex.adapter.taskDelivery, 'RAW_PIPE_EXACT_BYTES_THEN_EOF');

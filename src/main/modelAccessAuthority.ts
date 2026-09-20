@@ -1,5 +1,7 @@
 import { createHash } from 'node:crypto';
-import { createCoreRuntimeContract, type CoreRuntimeContract } from './codexWorkerContract';
+import { closeSync, fsyncSync, lstatSync, openSync, realpathSync, writeFileSync } from 'node:fs';
+import { dirname, join, parse, resolve } from 'node:path';
+import { createCoreRuntimeContract, isCanonicalAbsolutePath, isPathWithin, type CoreRuntimeContract } from './codexWorkerContract';
 import { coreScopeDigest, describeInertRuntime, type InertRuntimeDescriptor } from './runtimeAdapter';
 
 export type ModelRouteTrustClass = 'REMOTE_TLS' | 'LOCAL_LOOPBACK';
@@ -83,7 +85,7 @@ function accessBinding(core: CoreRuntimeContract, adapter: InertRuntimeDescripto
     trustClass: route.trustClass, expiresAt: route.expiresAt, evidenceId: route.evidenceId });
   if (!matchesCanonical(route, canonicalRoute)) throw new Error('Route authority substitution');
   const canonicalAdapter = describeInertRuntime(adapter.adapterId, core, adapter.executable, canonicalRoute.endpointPolicy.origin,
-    route.model, adapter.thinkingLevel ?? undefined);
+    route.model, adapter.thinkingLevel ?? undefined, adapter.maxTimeSeconds);
   if (!matchesCanonical(adapter, canonicalAdapter)) throw new Error('Adapter or model substitution');
   return createHash('sha256').update(JSON.stringify([canonicalCore, canonicalAdapter, canonicalRoute])).digest('hex');
 }
@@ -119,6 +121,82 @@ export function createInertModelAccessIssuer() {
         adapterId: adapter.adapterId, routeId: route.routeId, model: route.model,
         scopeDigest: route.scopeDigest, approval: 'SYNTHETIC_FIXTURE_ONLY',
         execution: 'NOT_RUN', network: 'NOT_AUTHORIZED' } as const);
+    }
+  });
+}
+
+/** Reservation is host evidence, never Human authorization or a network capability.
+ * Main must pin this directory across restarts and prove worker-denying OS ACLs before
+ * real execution. A caller-chosen alternate evidence directory is NOT a new attempt.
+ * No release, retry, deletion or receipt-update API exists. */
+export function createDurableAttemptReservationStore(evidenceDirectory: string) {
+  function canonicalDirectory(path: string): string {
+    if (!isCanonicalAbsolutePath(path) || resolve(path) !== path) throw new Error('Reservation directory must be native canonical absolute');
+    let cursor = path;
+    for (;;) {
+      const stat = lstatSync(cursor);
+      if (!stat.isDirectory() || stat.isSymbolicLink()) throw new Error('Reservation directory must be link-free');
+      if (cursor === parse(cursor).root) break;
+      cursor = dirname(cursor);
+    }
+    const physical = realpathSync.native(path);
+    if (process.platform === 'win32' ? physical.toLowerCase() !== path.toLowerCase() : physical !== path) throw new Error('Reservation directory redirected');
+    return physical;
+  }
+  // No directory creation: provisioning and its ACL proof belong to Main.
+  const directory = canonicalDirectory(evidenceDirectory);
+  const handles = new WeakMap<object, { binding: string; receiptPath: string }>();
+  return Object.freeze({
+    reserve(core: CoreRuntimeContract, adapter: InertRuntimeDescriptor, route: ModelRoute,
+      humanAuthorizationEvidenceId: string): object {
+      const binding = accessBinding(core, adapter, route);
+      if (!/^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/.test(humanAuthorizationEvidenceId)) throw new Error('Invalid Human authorization evidence id');
+      const root = canonicalDirectory(core.rootPolicy.root);
+      if (directory.toLowerCase() === root.toLowerCase() || isPathWithin(directory, root)
+        || isPathWithin(root, directory)) throw new Error('Reservation evidence must be disjoint from worker root');
+      if (canonicalDirectory(evidenceDirectory) !== directory) throw new Error('Reservation evidence directory changed');
+      // Key only by Human authorization: coherent scope substitutions cannot create a
+      // second slot using the same authorization. Main owns the stable store location.
+      const key = createHash('sha256').update(humanAuthorizationEvidenceId).digest('hex');
+      const receiptPath = join(directory, `omp-attempt-${key}.json`);
+      const receipt = { schemaVersion: 1, bindingDigest: binding, coreScopeDigest: coreScopeDigest(core),
+        adapterId: adapter.adapterId, executable: adapter.executable,
+        route: { trustClass: route.trustClass, endpoint: route.endpoint, model: route.model },
+        candidateId: core.candidateId, taskId: core.taskId, runId: core.runId, workerId: core.workerId,
+        sourceCheckpoint: core.sourceCheckpoint, taskDigest: core.taskDigest,
+        humanAuthorizationEvidenceId, expiresAt: route.expiresAt, attemptBound: 1,
+        consumption: 'RESERVATION_CONSUMES_ATTEMPT_INCLUDING_FAILURE_TIMEOUT_OR_CRASH',
+        retry: 'NEW_HUMAN_AUTHORIZATION_AND_NEW_ATTEMPT_IDENTITY_REQUIRED',
+        workerProtection: 'MAIN_OWNED_OS_ACL_PROOF_REQUIRED', authority: 'RESERVATION_ONLY',
+        credentials: 'NONE', network: 'NOT_AUTHORIZED', execution: 'NOT_RUN' };
+      const bytes = JSON.stringify(receipt) + '\n';
+      function reserveFile(path: string): void {
+        const fd = openSync(path, 'wx', 0o600);
+        // A short write/fsync failure consumes the slot too. Never repair history.
+        try { writeFileSync(fd, bytes, 'utf8'); fsyncSync(fd); }
+        finally { closeSync(fd); }
+      }
+      reserveFile(receiptPath);
+      // Two exclusive tombstones enforce BOTH fresh Human evidence and fresh Core
+      // attempt identity. A crash between writes still consumes the Human slot.
+      // A partial reservation never returns a handle and is not safe to retry.
+      const attemptKey = createHash('sha256').update(JSON.stringify([
+        core.candidateId, core.taskId, core.runId, core.workerId
+      ])).digest('hex');
+      reserveFile(join(directory, `attempt-identity-${attemptKey}.json`));
+      const handle = Object.freeze(Object.defineProperty({}, 'toJSON', {
+        value: () => { throw new Error('Reservation handle is not serializable'); }
+      }));
+      handles.set(handle, { binding, receiptPath });
+      return handle;
+    },
+    consume(handle: unknown, core: CoreRuntimeContract, adapter: InertRuntimeDescriptor, route: ModelRoute) {
+      const state = handle && typeof handle === 'object' ? handles.get(handle) : undefined;
+      if (!state) throw new Error('Forged, foreign or spent reservation');
+      if (accessBinding(core, adapter, route) !== state.binding) throw new Error('Reservation scope substitution');
+      handles.delete(handle as object);
+      return Object.freeze({ receiptPath: state.receiptPath, bindingDigest: state.binding,
+        authority: 'RESERVATION_ONLY', network: 'NOT_AUTHORIZED', execution: 'NOT_RUN' } as const);
     }
   });
 }
