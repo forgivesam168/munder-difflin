@@ -1,6 +1,7 @@
 import { createHash } from 'node:crypto';
 import { isCredentialLikeEnvironmentKey, type CodexWorkerContract } from './codexWorkerContract';
 import type { OwnedPtyLaunch } from './windowsOwnedPty';
+import { codexBackendArgv } from './runtimeAdapter';
 
 /** Main-only preparation metadata. No secret backend or network permission exists here. */
 export const MAX_PROVIDER_TASK_BYTES = 65_536;
@@ -247,10 +248,7 @@ export function describeProviderBackend(value: unknown, contract: CodexWorkerCon
   const preparation = stateOf(preparations, value);
   if (preparation.descriptor) return preparation.descriptor;
   const { endpoint } = preparation;
-  const args = Object.freeze(['--ignore-user-config', '--ask-for-approval', 'never', '--sandbox', 'workspace-write',
-    '-c', 'model_provider="munder"', '-c', 'model_providers.munder.name="Munder"',
-    '-c', `model_providers.munder.base_url=${JSON.stringify(endpoint.origin + '/v1')}`,
-    '-c', 'model_providers.munder.wire_api="responses"', 'exec', '-']);
+  const args = codexBackendArgv(endpoint.origin);
   preparation.descriptor = Object.freeze({ schema: 'PROVIDER_BACKEND', version: 1, disposition: 'PROVIDER_FREE_INERT',
     shell: false, args, endpoint, codexHome: contract.rootPolicy.codexHomeDir,
     framing: 'EXACT_BYTES_THEN_EOF', ioMode: 'RAW_PIPE', credentialDisposition: 'SYNTHETIC_ONLY',

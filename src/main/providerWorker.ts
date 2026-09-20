@@ -17,7 +17,7 @@ import {
   type AuthorityEvidence,
   type CodexExecutableDescriptor,
   type CodexWorkerContract,
-  type CodexWorkerIdentity,
+  type CoreWorkerIdentity,
   type CredentialMode,
   type CredentialPolicyEvidence,
   type ExecutableIdentityEvidence,
@@ -78,7 +78,7 @@ export interface ProviderWorkerPermit {
  */
 export interface ProviderWorkerPreparationInput {
   readonly permit: ProviderWorkerPermit | null;
-  readonly identity: CodexWorkerIdentity;
+  readonly identity: CoreWorkerIdentity;
   /** The approved executable descriptor: absolute path, version, SHA256. */
   readonly executable: CodexExecutableDescriptor;
   /** Main's observation of that approved executable. This module never observes or runs it. */

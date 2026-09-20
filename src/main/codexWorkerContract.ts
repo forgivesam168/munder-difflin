@@ -30,11 +30,16 @@ const CHECK_NAME_RE = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
 const CREDENTIAL_ENV_RE = /(?:API[_-]?KEY|TOKEN|SECRET|PASSWORD|PASSWD|AUTH|CREDENTIAL|COOKIE|PRIVATE[_-]?KEY|PROXY)/i;
 
 export interface SourceCheckpointIdentity { repositoryId: string; commitSha: string; treeSha: string }
-export interface CodexWorkerIdentity {
+/** Core identity is shared by all hardened adapters, not the interactive provider catalog. */
+export interface CoreWorkerIdentity {
   candidateId: string; taskId: string; runId: string; workerId: string;
   taskDigest: string; sourceCheckpoint: SourceCheckpointIdentity;
 }
-export interface CodexExecutableDescriptor { executablePath: string; version: string; executableSha256: string }
+/** Compatibility name for historical schemaVersion=1 request consumers. */
+export type CodexWorkerIdentity = CoreWorkerIdentity;
+export interface RuntimeExecutableDescriptor { executablePath: string; version: string; executableSha256: string }
+/** Compatibility name for historical schemaVersion=1 Codex contract consumers. */
+export type CodexExecutableDescriptor = RuntimeExecutableDescriptor;
 export interface SyntheticRootPolicy {
   root: string; projectDir: string; workDir: string; homeDir: string; userProfileDir: string;
   tempDir: string; codexHomeDir: string; artifactDir: string; resultPath: string;
@@ -74,10 +79,12 @@ export interface CodexWorkerContractInput extends CodexWorkerIdentity {
   executable: CodexExecutableDescriptor; syntheticRoot: string; credentialMode?: CredentialMode;
 }
 export interface DurableArtifact { path: string; sha256: string }
-export interface CodexTaskResult extends CodexWorkerIdentity {
+export interface CoreTaskResult extends CoreWorkerIdentity {
   schemaVersion: typeof CODEX_WORKER_RESULT_SCHEMA_VERSION; result: TerminalState;
   checks: Readonly<Record<string, TerminalState>>; artifacts: readonly DurableArtifact[];
 }
+/** Durable schemaVersion=1 has no runtime discriminator; retain its historical API name. */
+export type CodexTaskResult = CoreTaskResult;
 export interface ResultValidationOptions { resultAlreadyExists?: boolean }
 
 export interface ExecutableIdentityEvidence {
@@ -167,13 +174,57 @@ export function createSyntheticRootPolicy(root: string): SyntheticRootPolicy {
   return Object.freeze(policy);
 }
 
+/** No adapter home/config key is a mandatory Core input. */
+export interface CoreRootPolicy {
+  root: string; projectDir: string; workDir: string; homeDir: string; userProfileDir: string;
+  tempDir: string; configDir: string; artifactDir: string; resultPath: string;
+  allowedDirectories: readonly string[];
+}
+export function createCoreRootPolicy(root: string): CoreRootPolicy {
+  if (!isCanonicalAbsolutePath(root) || pathApi(root).parse(root).root === root) throw new Error('Invalid Core root');
+  const policy = { root, projectDir: joinPath(root, 'project'), workDir: joinPath(root, 'work'),
+    homeDir: joinPath(root, 'home'), userProfileDir: joinPath(root, 'user-profile'), tempDir: joinPath(root, 'temp'),
+    configDir: joinPath(root, 'runtime-config'), artifactDir: joinPath(root, 'artifacts'),
+    resultPath: joinPath(root, 'task-result.json'), allowedDirectories: [] as readonly string[] };
+  policy.allowedDirectories = Object.freeze([policy.projectDir, policy.workDir, policy.homeDir,
+    policy.userProfileDir, policy.tempDir, policy.configDir, policy.artifactDir]);
+  return Object.freeze(policy);
+}
+
+export interface CoreRuntimeContract extends CoreWorkerIdentity {
+  schemaVersion: 1; rootPolicy: CoreRootPolicy;
+  processOwnershipPolicy: ProcessOwnershipPolicy; resultPolicy: ResultPolicy;
+  authority: 'EXPLICIT_ONLY'; network: 'NOT_AUTHORIZED'; credentials: 'NONE';
+}
+export function createCoreRuntimeContract(input: CoreWorkerIdentity & { syntheticRoot: string }): CoreRuntimeContract {
+  assertId(input.candidateId, 'candidateId'); assertId(input.taskId, 'taskId');
+  assertId(input.runId, 'runId'); assertId(input.workerId, 'workerId');
+  const rootPolicy = createCoreRootPolicy(input.syntheticRoot);
+  return Object.freeze({ schemaVersion: 1, candidateId: input.candidateId, taskId: input.taskId,
+    runId: input.runId, workerId: input.workerId, taskDigest: sha256(input.taskDigest, 'taskDigest'),
+    sourceCheckpoint: normalizeSourceCheckpoint(input.sourceCheckpoint), rootPolicy,
+    authority: 'EXPLICIT_ONLY', network: 'NOT_AUTHORIZED', credentials: 'NONE',
+    processOwnershipPolicy: Object.freeze({ ptyOwnership: 'CREATION_TIME_REQUIRED', windowsJobOwnership: 'CREATION_TIME_REQUIRED',
+      descendants: 'MUST_REMAIN_OWNED', stop: 'BOUNDED_TREE_STOP_REQUIRED', timeout: 'BOUNDED_REQUIRED', cleanup: 'VERIFIED_EMPTY_REQUIRED' }),
+    resultPolicy: Object.freeze({ schemaVersion: 1, resultPath: rootPolicy.resultPath, artifactDir: rootPolicy.artifactDir,
+      durableResultRequired: true, processExitIsNotTaskCompletion: true, duplicateResult: 'REJECT',
+      staleOrConflictingIdentity: 'REJECT', artifactPaths: 'RELATIVE_TO_ARTIFACT_DIR_ONLY' }) });
+}
+
+function normalizeExecutableDescriptor(value: unknown, runtime: 'Runtime' | 'Codex'): RuntimeExecutableDescriptor {
+  if (!isRecord(value)) throw new Error(`Invalid ${runtime} executable descriptor`);
+  exactKeys(value, ['executablePath', 'version', 'executableSha256'], `${runtime} executable descriptor`);
+  if (!isCanonicalAbsolutePath(value.executablePath)) throw new Error(`${runtime} executable path must be canonical and absolute`);
+  if (/\.(?:cmd|bat|ps1)$/i.test(value.executablePath)) throw new Error(`${runtime} executable must not be a shell shim`);
+  assertString(value.version, `${runtime} executable version`);
+  return Object.freeze({ executablePath: value.executablePath, version: value.version, executableSha256: sha256(value.executableSha256, `${runtime} executable SHA256`) });
+}
+export function normalizeRuntimeExecutableDescriptor(value: unknown): RuntimeExecutableDescriptor {
+  return normalizeExecutableDescriptor(value, 'Runtime');
+}
+/** Compatibility wrapper retaining historical Codex validation and diagnostics. */
 export function normalizeCodexExecutableDescriptor(value: unknown): CodexExecutableDescriptor {
-  if (!isRecord(value)) throw new Error('Invalid Codex executable descriptor');
-  exactKeys(value, ['executablePath', 'version', 'executableSha256'], 'Codex executable descriptor');
-  if (!isCanonicalAbsolutePath(value.executablePath)) throw new Error('Codex executable path must be canonical and absolute');
-  if (/\.(?:cmd|bat|ps1)$/i.test(value.executablePath)) throw new Error('Codex executable must not be a shell shim');
-  assertString(value.version, 'Codex executable version');
-  return Object.freeze({ executablePath: value.executablePath, version: value.version, executableSha256: sha256(value.executableSha256, 'Codex executable SHA256') });
+  return normalizeExecutableDescriptor(value, 'Codex');
 }
 export function normalizeSourceCheckpoint(value: unknown): SourceCheckpointIdentity {
   if (!isRecord(value)) throw new Error('Invalid source checkpoint');
@@ -201,14 +252,15 @@ export function createCodexWorkerContract(input: CodexWorkerContractInput): Code
   });
 }
 
-function identityOf(value: CodexWorkerContract | CodexWorkerIdentity): CodexWorkerIdentity {
+function identityOf(value: CoreWorkerIdentity): CoreWorkerIdentity {
   return { candidateId: value.candidateId, taskId: value.taskId, runId: value.runId, workerId: value.workerId, taskDigest: value.taskDigest, sourceCheckpoint: value.sourceCheckpoint };
 }
 function sourceEqual(a: SourceCheckpointIdentity, b: SourceCheckpointIdentity): boolean { return a.repositoryId === b.repositoryId && a.commitSha === b.commitSha && a.treeSha === b.treeSha; }
-function assertRootPolicy(policy: SyntheticRootPolicy): void {
-  const expected = createSyntheticRootPolicy(policy.root); if (JSON.stringify(policy) !== JSON.stringify(expected)) throw new Error('Invalid synthetic root policy');
+function assertRootPolicy(policy: SyntheticRootPolicy | CoreRootPolicy): void {
+  const expected = 'codexHomeDir' in policy ? createSyntheticRootPolicy(policy.root) : createCoreRootPolicy(policy.root);
+  if (JSON.stringify(policy) !== JSON.stringify(expected)) throw new Error('Invalid synthetic root policy');
 }
-function artifactPath(policy: SyntheticRootPolicy, value: unknown): string {
+function artifactPath(policy: SyntheticRootPolicy | CoreRootPolicy, value: unknown): string {
   assertString(value, 'task result artifact path');
   if (value.includes('\\') || value.startsWith('/') || /^[A-Za-z]:/.test(value) || /[<>:"|?*]/.test(value)) throw new Error('Artifact path must be a safe relative path');
   const parts = value.split('/'); if (parts.some(part => !part || part === '.' || part === '..')) throw new Error('Artifact path must remain contained');
@@ -226,8 +278,8 @@ function resultChecks(value: unknown): Readonly<Record<string, TerminalState>> {
 }
 
 /** Pure durable-result validator; it does not read result or artifact bytes. */
-export function validateTaskResult(value: unknown, binding: CodexWorkerContract | CodexWorkerIdentity, rootPolicyOrOptions?: SyntheticRootPolicy | ResultValidationOptions, options: ResultValidationOptions = {}): CodexTaskResult {
-  const policy = 'rootPolicy' in binding ? binding.rootPolicy : rootPolicyOrOptions && 'root' in rootPolicyOrOptions ? rootPolicyOrOptions : undefined;
+export function validateTaskResult(value: unknown, binding: CoreWorkerIdentity & { rootPolicy?: SyntheticRootPolicy | CoreRootPolicy }, rootPolicyOrOptions?: SyntheticRootPolicy | CoreRootPolicy | ResultValidationOptions, options: ResultValidationOptions = {}): CoreTaskResult {
+  const policy = binding.rootPolicy ?? (rootPolicyOrOptions && 'root' in rootPolicyOrOptions ? rootPolicyOrOptions : undefined);
   const validationOptions = rootPolicyOrOptions && !('root' in rootPolicyOrOptions) ? rootPolicyOrOptions : options;
   if (!policy) throw new Error('Task result validation requires synthetic root policy');
   assertRootPolicy(policy);

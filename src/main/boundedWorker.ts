@@ -21,7 +21,7 @@ import {
   createCodexWorkerContract, classifyTerminal, evaluateCodexAdmission, isCanonicalAbsolutePath,
   isCredentialLikeEnvironmentKey, isPathWithin, validateTaskResult,
   type AdmissionDecision, type AdmissionGateName, type AdmissionState, type AuthorityEvidence,
-  type CodexTaskResult, type CodexWorkerContract, type CodexWorkerIdentity, type CredentialPolicyEvidence,
+  type CoreTaskResult, type CodexWorkerContract, type CoreWorkerIdentity, type CredentialPolicyEvidence,
   type ExecutableIdentityEvidence, type NetworkPolicyEvidence,
   type ResultPolicyEvidence, type RootPolicyEvidence, type TerminalClassification, type TerminalState
 } from './codexWorkerContract';
@@ -90,7 +90,7 @@ export interface BoundedWorkerPermit {
   readonly permitId: string;
   /** Epoch milliseconds. Enforced at prepare and at launch consumption, not at acceptance. */
   readonly expiresAt: number;
-  readonly identity: CodexWorkerIdentity;
+  readonly identity: CoreWorkerIdentity;
   readonly fixture: BoundedWorkerFixture;
   /** The fixture's request document path; outside the synthetic root, digest-bound below. */
   readonly requestPath: string;
@@ -151,7 +151,7 @@ export interface BoundedWorkerVerifiedArtifact { readonly path: string; readonly
 export interface BoundedWorkerAccepted {
   readonly outcome: 'ACCEPTED';
   readonly terminal: TerminalClassification;
-  readonly result: CodexTaskResult;
+  readonly result: CoreTaskResult;
   readonly resultSha256: string;
   readonly artifacts: readonly BoundedWorkerVerifiedArtifact[];
   readonly receiptPath: string;
@@ -841,7 +841,7 @@ export function deliverPreparedProviderInput(value: unknown, transport: { input(
   finally { bytes.fill(0); }
 }
 
-const STRUCTURED_COMPLETIONS = new WeakMap<object, { prepared: PreparedBoundedWorker; result: CodexTaskResult }>();
+const STRUCTURED_COMPLETIONS = new WeakMap<object, { prepared: PreparedBoundedWorker; result: CoreTaskResult }>();
 const ACTIVE_COMPLETION = Object.freeze({});
 
 /** Explicit fixture-only event source. Real Codex recognition remains UNKNOWN, with no output parser. */
@@ -953,7 +953,7 @@ function listArtifactFiles(artifactDir: string, maxCount: number): ListedArtifac
   return files;
 }
 
-function verifyArtifacts(result: CodexTaskResult, artifactDir: string, limits: BoundedWorkerLimits): readonly BoundedWorkerVerifiedArtifact[] {
+function verifyArtifacts(result: CoreTaskResult, artifactDir: string, limits: BoundedWorkerLimits): readonly BoundedWorkerVerifiedArtifact[] {
   if (result.artifacts.length > limits.maxArtifactCount) throw new Error('Durable artifacts exceed the count limit');
   assertApprovedLocalPath(artifactDir, 'Durable artifact directory');
   const listed = listArtifactFiles(artifactDir, limits.maxArtifactCount);
@@ -1032,7 +1032,7 @@ function acceptBoundedWorkerResult(prepared: PreparedBoundedWorker, receipt: Own
     return Object.freeze({ outcome: 'INVALID', reason: `durable task result is unreadable: ${String(error)}`, bindingDigest });
   }
 
-  let result: CodexTaskResult;
+  let result: CoreTaskResult;
   try {
     result = validateTaskResult(JSON.parse(resultBytes.toString('utf8')) as unknown, state.contract, { resultAlreadyExists: false });
   } catch (error) {
