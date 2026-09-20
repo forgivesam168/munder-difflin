@@ -30,7 +30,7 @@ import {
 import { buildCodexWorkerEnv, validateCodexWorkerEnv, type CodexWorkerEnvironmentInput } from './ptyEnv';
 import { buildCodexWorkerLaunch, type CodexWorkerLaunch } from './workerLaunch';
 import { assertPreparedBoundedWorker, prepareBoundedWorker, publishBoundedWorkerTaskResult, type BoundedWorkerPermit, type PreparedBoundedWorker } from './boundedWorker';
-import { assertProviderExecutionPreparation } from './providerExecutionPreparation';
+import { assertProviderExecutionPreparation, assertProviderNetworkAuthority, providerExecutionEvidence, type ProviderExecutionEvidence } from './providerExecutionPreparation';
 
 export const PROVIDER_PREFLIGHT_SCHEMA_VERSION = 1 as const;
 
@@ -229,18 +229,18 @@ const SPENT_PREFLIGHTS = new WeakSet<object>();
 
 /** Main owns this closure; neither the issuer nor its tickets belong in spawn data. */
 export function createProviderWorkerBridge() {
-  const tickets = new WeakMap<object, { preflight: ProviderWorkerPreflight; permit: BoundedWorkerPermit; execution: unknown }>();
+  const tickets = new WeakMap<object, { preflight: ProviderWorkerPreflight; permit: BoundedWorkerPermit; execution: unknown; networkAuthority: unknown }>();
   return Object.freeze({
-    authorize(preflight: ProviderWorkerPreflight, permit: BoundedWorkerPermit, invocationAuthority: 'AUTHORIZED', execution?: unknown): object {
+    authorize(preflight: ProviderWorkerPreflight, permit: BoundedWorkerPermit, networkAuthority: unknown, execution?: unknown): object {
       assertProviderWorkerPreflight(preflight);
-      if (invocationAuthority !== 'AUTHORIZED') throw new Error('Provider invocation authority is absent');
       if (!preflight.providerAdmissionReady) throw new Error(decideProviderWorkerLaunch(preflight).reason);
       assertProviderExecutionPreparation(execution, preflight.contract);
+      assertProviderNetworkAuthority(networkAuthority, execution, preflight.contract);
       if (SPENT_PREFLIGHTS.has(preflight)) throw new Error('Provider preflight bridge right was already consumed');
       const ticket = Object.freeze({});
       // Snapshot only explicit Main-held permit data; no request data can issue a ticket.
       const snapshot = JSON.parse(JSON.stringify(permit)) as BoundedWorkerPermit;
-      tickets.set(ticket, { preflight, permit: snapshot, execution });
+      tickets.set(ticket, { preflight, permit: snapshot, execution, networkAuthority });
       return ticket;
     },
     prepare(value: unknown, ticket: unknown): PreparedBoundedWorker {
@@ -254,7 +254,8 @@ export function createProviderWorkerBridge() {
       tickets.delete(ticket as object);
       SPENT_PREFLIGHTS.add(value);
       assertProviderExecutionPreparation(entry.execution, value.contract);
-      const binding = Object.freeze({ preflight: value, expiresAt: state.expiresAt, execution: entry.execution });
+      const binding = Object.freeze({ preflight: value, expiresAt: state.expiresAt, execution: entry.execution,
+        networkAuthority: entry.networkAuthority, evidence: providerExecutionEvidence(entry.execution, value.contract) });
       BRIDGE_BINDINGS.set(binding, binding);
       return prepareBoundedWorker(entry.permit, binding);
     }
@@ -271,7 +272,26 @@ export function createProviderTaskResultAdapter(prepared: PreparedBoundedWorker)
   });
 }
 
-const BRIDGE_BINDINGS = new WeakMap<object, { readonly preflight: ProviderWorkerPreflight; readonly expiresAt: number; readonly execution: unknown }>();
+/** Separate recognized structured-completion capability; terminal output and exit have no issuer. */
+export function createRecognizedProviderCompletionIssuer(prepared: PreparedBoundedWorker) {
+  const adapter = createProviderTaskResultAdapter(prepared);
+  const capabilities = new WeakSet<object>();
+  return Object.freeze({
+    recognizeStructuredCompletion(): object {
+      const capability = Object.freeze({});
+      capabilities.add(capability);
+      return capability;
+    },
+    publish(capability: unknown, result: unknown): void {
+      if (!capability || typeof capability !== 'object' || !capabilities.has(capability))
+        throw new Error('Missing recognized structured completion capability');
+      adapter.publish(result);
+      capabilities.delete(capability);
+    }
+  });
+}
+
+const BRIDGE_BINDINGS = new WeakMap<object, { readonly preflight: ProviderWorkerPreflight; readonly expiresAt: number; readonly execution: unknown; readonly networkAuthority: unknown; readonly evidence: ProviderExecutionEvidence }>();
 
 /** Internal bounded preparation ingestion: structural objects never cross this seam. */
 export function consumeProviderWorkerBridge(value: unknown) {

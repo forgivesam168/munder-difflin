@@ -21,6 +21,7 @@ namespace Munder.WindowsOwnedPty
         public int rows { get; set; }
         public int timeoutMs { get; set; }
         public int cleanupMs { get; set; }
+        public string ioMode { get; set; } = "CONPTY";
     }
 
     public sealed class ExitReceipt
@@ -32,6 +33,8 @@ namespace Munder.WindowsOwnedPty
         public string cleanupState { get; set; } = "UNVERIFIED";
         public bool ioDrained { get; set; }
         public bool pseudoConsoleClosed { get; set; }
+        public string ioMode { get; set; } = "CONPTY";
+        public bool inputClosed { get; set; }
         public string reason { get; set; } = "launch-failure";
         [System.Text.Json.Serialization.JsonIgnore(Condition = System.Text.Json.Serialization.JsonIgnoreCondition.WhenWritingNull)]
         public string error { get; set; }
@@ -42,6 +45,7 @@ namespace Munder.WindowsOwnedPty
         const uint JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE = 0x00002000;
         const uint EXTENDED_STARTUPINFO_PRESENT = 0x00080000;
         const uint CREATE_UNICODE_ENVIRONMENT = 0x00000400;
+        const uint PROC_THREAD_ATTRIBUTE_HANDLE_LIST = 0x00020002;
         const uint STARTF_USESTDHANDLES = 0x00000100;
         const uint PROC_THREAD_ATTRIBUTE_PSEUDOCONSOLE = 0x00020016;
         const uint PROC_THREAD_ATTRIBUTE_JOB_LIST = 0x0002000D;
@@ -241,6 +245,8 @@ namespace Munder.WindowsOwnedPty
             public string reason;
             public string error;
             public bool eof;
+            public IntPtr inputWrite;
+            public bool inputClosed;
         }
 
         [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
@@ -437,7 +443,7 @@ namespace Munder.WindowsOwnedPty
             return false;
         }
 
-        static void ProcessControls(ControlState control, IntPtr job, IntPtr inputWrite, IntPtr pseudoConsole)
+        static void ProcessControls(ControlState control, IntPtr job, IntPtr inputWrite, IntPtr pseudoConsole, bool raw)
         {
             try
             {
@@ -460,14 +466,24 @@ namespace Munder.WindowsOwnedPty
                     }
                     if (type == "resize")
                     {
+                        if (raw) throw new InvalidDataException("Resize is not supported for RAW_PIPE");
                         int cols = command.GetProperty("cols").GetInt32();
                         int rows = command.GetProperty("rows").GetInt32();
                         if (cols < 1 || cols > 32767 || rows < 1 || rows > 32767) throw new InvalidDataException("Invalid resize bounds");
                         CheckHr(ResizePseudoConsole(pseudoConsole, new Coord((short)cols, (short)rows)), "ResizePseudoConsole");
                         continue;
                     }
-                    if (type == "write")
+                    if (type == "close-input")
                     {
+                        if (!raw || control.inputClosed) throw new InvalidDataException("Invalid input closure");
+                        Check(CloseHandle(control.inputWrite), "Close input");
+                        control.inputWrite = IntPtr.Zero;
+                        control.inputClosed = true;
+                        continue;
+                    }
+                    if (type == "write" || type == "input")
+                    {
+                        if ((type == "input") != raw || control.inputClosed) throw new InvalidDataException("Invalid input mode or closed input");
                         string encoded = command.GetProperty("data").GetString();
                         byte[] data = Convert.FromBase64String(encoded ?? "");
                         if (data.Length == 0 || data.Length > MaxWriteBytes) throw new InvalidDataException("Invalid write size");
@@ -523,7 +539,7 @@ namespace Munder.WindowsOwnedPty
             ExitReceipt receipt = new ExitReceipt();
             IntPtr job = IntPtr.Zero, inputRead = IntPtr.Zero, inputWrite = IntPtr.Zero;
             IntPtr outputRead = IntPtr.Zero, outputWrite = IntPtr.Zero, pseudoConsole = IntPtr.Zero;
-            IntPtr attributes = IntPtr.Zero, jobValue = IntPtr.Zero, environment = IntPtr.Zero;
+            IntPtr attributes = IntPtr.Zero, jobValue = IntPtr.Zero, environment = IntPtr.Zero, inheritedHandles = IntPtr.Zero;
             bool attributesInitialized = false;
             ProcessInformation process = new ProcessInformation();
             OutputDrain drain = null;
@@ -536,6 +552,8 @@ namespace Munder.WindowsOwnedPty
                     launch.cols < 1 || launch.rows < 1 || launch.cols > 32767 || launch.rows > 32767 ||
                     launch.timeoutMs < 100 || launch.timeoutMs > 86400000 || launch.cleanupMs < 100 || launch.cleanupMs > 60000)
                     throw new ArgumentException("Invalid native launch request");
+                if (launch.ioMode != "CONPTY" && launch.ioMode != "RAW_PIPE") throw new ArgumentException("Invalid I/O mode");
+                receipt.ioMode = launch.ioMode;
                 string commandLine = BuildCommandLine(launch);
                 environment = BuildEnvironment(launch.env);
 
@@ -551,7 +569,8 @@ namespace Munder.WindowsOwnedPty
                 Check(CreatePipe(out outputRead, out outputWrite, ref security, 0), "CreatePipe output");
                 Check(SetHandleInformation(inputWrite, HANDLE_FLAG_INHERIT, 0), "SetHandleInformation input");
                 Check(SetHandleInformation(outputRead, HANDLE_FLAG_INHERIT, 0), "SetHandleInformation output");
-                CheckHr(CreatePseudoConsole(new Coord((short)launch.cols, (short)launch.rows), inputRead, outputWrite, 0, out pseudoConsole), "CreatePseudoConsole");
+                bool raw = launch.ioMode == "RAW_PIPE";
+                if (!raw) CheckHr(CreatePseudoConsole(new Coord((short)launch.cols, (short)launch.rows), inputRead, outputWrite, 0, out pseudoConsole), "CreatePseudoConsole");
 
                 IntPtr attributeSize = IntPtr.Zero;
                 bool sizing = InitializeProcThreadAttributeList(IntPtr.Zero, 2, 0, ref attributeSize);
@@ -561,7 +580,7 @@ namespace Munder.WindowsOwnedPty
                 attributes = Marshal.AllocHGlobal(attributeSize.ToInt32());
                 Check(InitializeProcThreadAttributeList(attributes, 2, 0, ref attributeSize), "InitializeProcThreadAttributeList");
                 attributesInitialized = true;
-                Check(UpdateProcThreadAttribute(attributes, 0, new IntPtr(PROC_THREAD_ATTRIBUTE_PSEUDOCONSOLE),
+                if (!raw) Check(UpdateProcThreadAttribute(attributes, 0, new IntPtr(PROC_THREAD_ATTRIBUTE_PSEUDOCONSOLE),
                     pseudoConsole, new IntPtr(IntPtr.Size), IntPtr.Zero, IntPtr.Zero), "UpdateProcThreadAttribute PSEUDOCONSOLE");
                 jobValue = Marshal.AllocHGlobal(IntPtr.Size);
                 Marshal.WriteIntPtr(jobValue, job);
@@ -572,8 +591,22 @@ namespace Munder.WindowsOwnedPty
                 startup.StartupInfo.cb = (uint)Marshal.SizeOf(typeof(StartupInfoEx));
                 startup.StartupInfo.dwFlags = STARTF_USESTDHANDLES;
                 startup.lpAttributeList = attributes;
+                if (raw)
+                {
+                    startup.StartupInfo.hStdInput = inputRead;
+                    startup.StartupInfo.hStdOutput = outputWrite;
+                    startup.StartupInfo.hStdError = outputWrite;
+                }
+                if (raw)
+                {
+                    inheritedHandles = Marshal.AllocHGlobal(IntPtr.Size * 2);
+                    Marshal.WriteIntPtr(inheritedHandles, inputRead);
+                    Marshal.WriteIntPtr(inheritedHandles, IntPtr.Size, outputWrite);
+                    Check(UpdateProcThreadAttribute(attributes, 0, new IntPtr(PROC_THREAD_ATTRIBUTE_HANDLE_LIST),
+                        inheritedHandles, new IntPtr(IntPtr.Size * 2), IntPtr.Zero, IntPtr.Zero), "UpdateProcThreadAttribute HANDLE_LIST");
+                }
                 StringBuilder mutableCommandLine = new StringBuilder(commandLine);
-                Check(CreateProcessW(launch.executablePath, mutableCommandLine, IntPtr.Zero, IntPtr.Zero, false,
+                Check(CreateProcessW(launch.executablePath, mutableCommandLine, IntPtr.Zero, IntPtr.Zero, raw,
                     EXTENDED_STARTUPINFO_PRESENT | CREATE_UNICODE_ENVIRONMENT, environment, launch.cwd,
                     ref startup, out process), "CreateProcessW");
                 processCreated = true;
@@ -592,7 +625,9 @@ namespace Munder.WindowsOwnedPty
                 protocol.Send(new { type = "started", pid = receipt.rootPid.Value });
                 controlReader = Task.Factory.StartNew(() => ReadControls(controlInput, control), CancellationToken.None,
                     TaskCreationOptions.LongRunning, TaskScheduler.Default);
-                controlProcessor = Task.Factory.StartNew(() => ProcessControls(control, job, inputWrite, pseudoConsole), CancellationToken.None,
+                control.inputWrite = inputWrite;
+                inputWrite = IntPtr.Zero;
+                controlProcessor = Task.Factory.StartNew(() => ProcessControls(control, job, control.inputWrite, pseudoConsole, raw), CancellationToken.None,
                     TaskCreationOptions.LongRunning, TaskScheduler.Default);
 
                 Stopwatch lifetime = Stopwatch.StartNew();
@@ -669,6 +704,18 @@ namespace Munder.WindowsOwnedPty
                     pseudoConsole = IntPtr.Zero;
                     receipt.pseudoConsoleClosed = true;
                 }
+                // Job termination releases a blocked pipe writer before its owned handle is closed.
+                bool processorStopped = controlProcessor == null || controlProcessor.Wait(Math.Max(100, launch.cleanupMs));
+                if (processorStopped)
+                {
+                    if (control.inputWrite != IntPtr.Zero)
+                    {
+                        bool closed = CloseHandle(control.inputWrite);
+                        control.inputWrite = IntPtr.Zero;
+                        control.inputClosed = closed;
+                    }
+                    receipt.inputClosed = receipt.ioMode == "RAW_PIPE" && control.inputClosed;
+                }
                 CloseOwned(ref inputWrite);
                 if (drain != null)
                 {
@@ -690,6 +737,7 @@ namespace Munder.WindowsOwnedPty
                 if (attributesInitialized) DeleteProcThreadAttributeList(attributes);
                 if (attributes != IntPtr.Zero) Marshal.FreeHGlobal(attributes);
                 if (jobValue != IntPtr.Zero) Marshal.FreeHGlobal(jobValue);
+                if (inheritedHandles != IntPtr.Zero) Marshal.FreeHGlobal(inheritedHandles);
                 if (environment != IntPtr.Zero) Marshal.FreeHGlobal(environment);
                 CloseOwned(ref job);
                 try { protocol.Send(new { type = "exit", receipt = receipt }); } catch { }

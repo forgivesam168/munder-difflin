@@ -21,14 +21,18 @@ const preflightApi = loadTs('src/main/providerWorker.ts');
 const contractApi = loadTs('src/main/codexWorkerContract.ts');
 const executionApi = loadTs('src/main/providerExecutionPreparation.ts');
 // Inert handles and .invalid metadata prove mechanics only, never provider/network authority.
+const executionNetworks = new WeakMap();
 function executionFor(contract, text = 'provider-mechanics-only') {
   const issuer = executionApi.createProviderExecutionIssuer();
   const expiresAt = Date.now() + 120_000;
   const request = Buffer.from(JSON.stringify({ contract, task: { encoding: 'utf8', text } }));
-  return issuer.prepare(contract, issuer.mintCredential(contract, {
-    recordId: 'synthetic-human-record', grantedBy: 'HUMAN', purpose: 'PROVIDER_EXECUTION',
+  const provenance = issuer.createSyntheticProvenance(contract, expiresAt);
+  const execution = issuer.prepare(contract, issuer.mintCredential(contract, {
+    recordId: 'synthetic-record', grantedBy: 'SYNTHETIC_ONLY', purpose: 'PROVIDER_EXECUTION',
     scopeDigest: executionApi.providerCredentialScopeDigest(contract), endpointOrigin: 'https://provider.invalid', expiresAt
-  }), issuer.mintTask(contract, request, expiresAt), 'https://provider.invalid');
+  }, provenance), issuer.mintTask(contract, request, expiresAt), 'https://provider.invalid');
+  executionNetworks.set(execution, issuer.mintInertNetworkAuthority(execution, contract, expiresAt));
+  return execution;
 }
 const launchApi = loadTs('src/main/workerLaunch.ts');
 // The PTY layer is loaded ONLY to prove its defense-in-depth refusal. Nothing in
@@ -462,14 +466,15 @@ test('bridge refuses absent authority and structural preflights without effects'
       assert.throws(() => bridge.authorize(preflight, {}, 'AUTHORIZED'), /BLOCKED/);
       assert.throws(() => bridge.prepare(preflight, {}), /BLOCKED/);
     }
-    assert.throws(() => bridge.authorize(ready, {}, undefined), /invocation authority/);
+    assert.throws(() => bridge.authorize(ready, {}, undefined, executionFor(ready.contract)), /network authority is absent/);
     for (const fake of [{}, { ...ready }, JSON.parse(JSON.stringify(ready))]) {
       assert.throws(() => bridge.authorize(fake, {}, 'AUTHORIZED'), /not minted/);
       assert.throws(() => bridge.prepare(fake, {}), /not minted/);
     }
     assert.throws(() => bridge.prepare(ready, undefined), /authority is absent/);
     assert.throws(() => bridge.authorize(ready, {}, 'AUTHORIZED'), /Missing or forged/);
-    const ticket = bridge.authorize(ready, {}, 'AUTHORIZED', executionFor(ready.contract));
+    const execution = executionFor(ready.contract);
+    const ticket = bridge.authorize(ready, {}, executionNetworks.get(execution), execution);
     for (const fake of [{}, { ...ticket }, JSON.parse(JSON.stringify(ticket))]) {
       assert.throws(() => bridge.prepare(ready, fake), /authority is absent/);
     }
@@ -486,21 +491,21 @@ test('expired preflight cannot bridge and a failed preparation spends every tick
   const bridge = preflightApi.createProviderWorkerBridge();
   const ready = prepareProviderBackedWorker(allEvidenceInput());
   const execution = executionFor(ready.contract);
-  const ticket = bridge.authorize(ready, {}, 'AUTHORIZED', execution);
+  const ticket = bridge.authorize(ready, {}, executionNetworks.get(execution), execution);
   const originalNow = Date.now;
   try {
     Date.now = () => permit.expiresAt + 1;
     assert.throws(() => bridge.prepare(ready, ticket), /expired/);
   } finally { Date.now = originalNow; }
-  const second = bridge.authorize(ready, {}, 'AUTHORIZED', execution);
+  const second = bridge.authorize(ready, {}, executionNetworks.get(execution), execution);
   const otherBridge = preflightApi.createProviderWorkerBridge();
-  const other = otherBridge.authorize(ready, {}, 'AUTHORIZED', execution);
+  const other = otherBridge.authorize(ready, {}, executionNetworks.get(execution), execution);
   const witnessed = withInvocationWitness(() => {
     assert.throws(() => bridge.prepare(ready, ticket), /permitId/);
     assert.throws(() => bridge.prepare(ready, ticket), /authority is absent/);
     assert.throws(() => bridge.prepare(ready, second), /already consumed/);
     assert.throws(() => otherBridge.prepare(ready, other), /already consumed/);
-    assert.throws(() => bridge.authorize(ready, {}, 'AUTHORIZED', execution), /already consumed/);
+    assert.throws(() => bridge.authorize(ready, {}, executionNetworks.get(execution), execution), /already consumed/);
   });
   assert.deepEqual(witnessed.attempts, []);
 });
@@ -947,14 +952,9 @@ test('the production bridge reaches a minted PreparedBoundedWorker with zero inv
   try {
     witnessed = withInvocationWitness(() => {
       const preflight = prepareProviderBackedWorker(bridgeReadyInput);
-      const ticket = bridge.authorize(preflight, localPermit, 'AUTHORIZED',
-        executionFor(preflight.contract, 'p-bridge-local-mocked-ready'));
+      const execution = executionFor(preflight.contract, 'p-bridge-local-mocked-ready');
+      const ticket = bridge.authorize(preflight, localPermit, executionNetworks.get(execution), execution);
       const prepared = bridge.prepare(preflight, ticket);
-      // The first trusted launch-consumption attempt spends the once-only provider
-      // credential/task authority even though the unavailable backend refuses; the
-      // second attempt fails closed on spent authority before backend enforcement.
-      assert.throws(() => bounded.consumePreparedBoundedWorker(prepared), /BLOCKED_BACKEND_REQUIREMENT/);
-      assert.throws(() => bounded.consumePreparedBoundedWorker(prepared), /Revoked, spent or conflicting preparation authority/);
       return { preflight, ticket, prepared };
     });
   } finally {
@@ -1033,17 +1033,14 @@ test('the production bridge reaches a minted PreparedBoundedWorker with zero inv
   const refusals = withInvocationWitness(() => {
     assert.throws(() => bridge.prepare(preflight, ticket), /authority is absent or does not match preflight/);
     assert.throws(() => bridge.prepare(preflight, { ...ticket }), /authority is absent or does not match preflight/);
-    assert.throws(() => bridge.authorize(preflight, localPermit, 'AUTHORIZED',
-      executionFor(preflight.contract, 'p-bridge-local-mocked-ready')), /already consumed/);
+    const execution = executionFor(preflight.contract, 'p-bridge-local-mocked-ready');
+    assert.throws(() => bridge.authorize(preflight, localPermit, executionNetworks.get(execution), execution), /already consumed/);
     assert.throws(() => bridge.prepare({ ...preflight }, ticket), /was not minted by prepareProviderBackedWorker/);
     assert.throws(() => preflightApi.createProviderWorkerBridge().prepare(preflight, ticket), /does not match preflight/);
   });
   assert.deepEqual(refusals.attempts, []);
 
-  // No PTY/provider invocation occurred. Trusted launch consumption was exercised only
-  // to prove that the unavailable dedicated backend refuses before a launch effect; that
-  // refused attempt nevertheless spent the once-only provider authority, and a replay is
-  // refused on spent authority before any backend enforcement.
+  // No PTY/provider invocation occurred; successful inert consumption grants no durable result.
   assert.deepEqual(witnessed.attempts, []);
   assert.deepEqual(connects, []);
   const approvedRequest = fs.readFileSync(requestPath);
@@ -1053,6 +1050,11 @@ test('the production bridge reaches a minted PreparedBoundedWorker with zero inv
       assert.throws(() => bounded.consumePreparedBoundedWorker(prepared), /approved SHA256/));
     assert.deepEqual(changed.attempts, []);
   } finally { fs.writeFileSync(requestPath, approvedRequest); }
+  const consumption = withInvocationWitness(() => {
+    bounded.consumePreparedBoundedWorker(prepared);
+    assert.throws(() => bounded.consumePreparedBoundedWorker(prepared), /already been consumed for launch/);
+  });
+  assert.deepEqual(consumption.attempts, []);
 
   // The trusted adapter also accepts the real local provider-free preparation seam.
   // Consumption is a lifecycle transition only: no native launch is performed.
@@ -1068,6 +1070,13 @@ test('the production bridge reaches a minted PreparedBoundedWorker with zero inv
     result: 'PASS', checks: { credentialMode: 'PASS' }, artifacts: [] };
   assert.throws(() => adapter.publish(result), /not live/);
   bounded.consumePreparedBoundedWorker(free);
+  const recognized = preflightApi.createRecognizedProviderCompletionIssuer(free);
+  const completion = recognized.recognizeStructuredCompletion();
+  for (const fake of [{}, { ...completion }, JSON.parse(JSON.stringify(completion)),
+    preflightApi.createRecognizedProviderCompletionIssuer(free).recognizeStructuredCompletion()])
+    assert.throws(() => recognized.publish(fake, result), /Missing recognized/);
+  for (const output of ['PASS', 0]) assert.throws(() => recognized.publish(completion, output));
+  assert.equal(fs.existsSync(free.contract.resultPolicy.resultPath), false);
   for (const invalid of [{ ...result, runId: 'stale' },
     { ...result, checks: { mechanics: 'FAIL' } },
     { ...result, checks: { api_key: 'PASS' } }]) assert.throws(() => adapter.publish(invalid));
@@ -1081,7 +1090,8 @@ test('the production bridge reaches a minted PreparedBoundedWorker with zero inv
     assert.throws(() => adapter.publish(result), /synthetic publication failure/);
   } finally { fs.linkSync = originalLink; }
   assert.equal(fs.existsSync(free.contract.resultPolicy.resultPath), false);
-  adapter.publish(result);
+  recognized.publish(completion, result);
+  assert.throws(() => recognized.publish(completion, result), /Missing recognized/);
   const canonical = contractApi.validateTaskResult(result, free.contract, { resultAlreadyExists: false });
   assert.equal(fs.readFileSync(free.contract.resultPolicy.resultPath, 'utf8'), `${JSON.stringify(canonical, null, 2)}\n`);
   assert.throws(() => adapter.publish(result), /already consumed/);

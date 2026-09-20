@@ -116,6 +116,8 @@ function Write-FailureReceipt {
             cleanupState = 'UNVERIFIED'
             ioDrained = $false
             pseudoConsoleClosed = $false
+            ioMode = 'CONPTY'
+            inputClosed = $false
             reason = 'launch-failure'
             error = $Message
         }
@@ -137,13 +139,14 @@ try {
     $launch = $line | ConvertFrom-Json -Depth 8
     $expectedProperties = @(
         'helperPath', 'helperSha256', 'scriptPath', 'scriptSha256', 'nativeSourcePath', 'nativeSourceSha256',
-        'executablePath', 'executableSha256', 'args', 'cwd', 'env', 'cols', 'rows', 'timeoutMs', 'cleanupMs'
+        'executablePath', 'executableSha256', 'args', 'cwd', 'env', 'cols', 'rows', 'timeoutMs', 'cleanupMs', 'ioMode'
     )
     $actualProperties = @($launch.PSObject.Properties.Name)
     if ($actualProperties.Count -ne $expectedProperties.Count -or
         @($actualProperties | Where-Object { $_ -cnotin $expectedProperties }).Count -ne 0) {
         throw 'Initial launch frame schema is invalid'
     }
+    if ($launch.ioMode -cnotin @('CONPTY', 'RAW_PIPE')) { throw 'Invalid I/O mode' }
 
     $helperPath = Get-CanonicalRegularFile -Value $launch.helperPath -Name 'helperPath'
     $scriptPath = Get-CanonicalRegularFile -Value $launch.scriptPath -Name 'scriptPath'
@@ -192,6 +195,7 @@ try {
     Add-Type -Path $nativeSourcePath -ErrorAction Stop
     $nativeJson = ([ordered]@{
         executablePath = $executablePath
+        ioMode = $launch.ioMode
         args = @($launch.args)
         cwd = $cwd
         env = $launch.env

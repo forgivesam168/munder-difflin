@@ -5,9 +5,9 @@ import { isCredentialLikeEnvironmentKey, type CodexWorkerContract } from './code
 export const MAX_PROVIDER_TASK_BYTES = 65_536;
 export const PROVIDER_EXECUTION_DEFAULTS = Object.freeze({
   credentialHandoff: 'NOT_AUTHORIZED', networkAuthority: 'NOT_AUTHORIZED',
-  endpointApproval: 'OPEN_DECISION', backend: 'BLOCKED_BACKEND_REQUIREMENT',
+  endpointApproval: 'OPEN_DECISION', backend: 'IMPLEMENTED_INERT_ONLY', providerInvocation: 'NOT_RUN',
   containment: 'APPLICATION_LEVEL_ENDPOINT_BINDING', OS_LEVEL_NETWORK_CONTAINMENT: 'UNKNOWN',
-  limitation: 'DNS resolution and OS egress are not contained; provider configuration enforcement is not implemented'
+  limitation: 'Application policy only; DNS, redirects by external clients and OS egress are not contained'
 } as const);
 
 function record(value: unknown): Record<string, unknown> {
@@ -31,7 +31,7 @@ export interface ProviderEndpointPolicy {
   readonly redirects: 'DENY'; readonly alternateOrigins: 'DENY'; readonly callerOverride: 'DENY';
   readonly proxyEnvironment: 'DENY'; readonly containment: 'APPLICATION_LEVEL_ENDPOINT_BINDING';
   readonly OS_LEVEL_NETWORK_CONTAINMENT: 'UNKNOWN';
-  readonly configurationBackend: 'NOT_IMPLEMENTED'; readonly execution: 'BLOCKED_BACKEND_REQUIREMENT';
+  readonly configurationBackend: 'DESCRIPTOR_ONLY'; readonly execution: 'INERT_ONLY';
 }
 export function prepareProviderEndpoint(origin: string): ProviderEndpointPolicy {
   const url = new URL(origin);
@@ -42,7 +42,7 @@ export function prepareProviderEndpoint(origin: string): ProviderEndpointPolicy 
   return Object.freeze({ origin, scheme: 'https:', host: url.hostname, port: Number(url.port || 443),
     redirects: 'DENY', alternateOrigins: 'DENY', callerOverride: 'DENY', proxyEnvironment: 'DENY',
     containment: 'APPLICATION_LEVEL_ENDPOINT_BINDING', OS_LEVEL_NETWORK_CONTAINMENT: 'UNKNOWN',
-    configurationBackend: 'NOT_IMPLEMENTED', execution: 'BLOCKED_BACKEND_REQUIREMENT' });
+    configurationBackend: 'DESCRIPTOR_ONLY', execution: 'INERT_ONLY' });
 }
 /** An application-level guard, NOT a network client or an OS containment claim. */
 export function enforceProviderEndpoint(policy: ProviderEndpointPolicy, target: string,
@@ -74,13 +74,13 @@ export function readProviderTaskDocument(bytes: Buffer, contract: CodexWorkerCon
 
 export interface ProviderCredentialAuthorization {
   readonly recordId: string;
-  readonly grantedBy: 'HUMAN';
+  readonly grantedBy: 'SYNTHETIC_ONLY';
   readonly purpose: 'PROVIDER_EXECUTION';
   readonly scopeDigest: string;
   readonly endpointOrigin: string;
   readonly expiresAt: number;
 }
-/** Main supplies an explicit Human record; this metadata does not verify Human provenance. */
+/** Synthetic provisioning metadata is not Human authorization. */
 export function providerCredentialScopeDigest(contract: CodexWorkerContract): string {
   return digest(Buffer.from(JSON.stringify(contract), 'utf8'));
 }
@@ -89,36 +89,52 @@ function opaqueCapability(): object {
     value: () => { throw new Error('Preparation authority is not serializable'); }
   }));
 }
-interface CredentialState { binding: string; authorization: Readonly<ProviderCredentialAuthorization>; expiresAt: number; revoked: boolean; spent: boolean }
+interface CredentialState { binding: string; authorization: Readonly<ProviderCredentialAuthorization>; material: Buffer; expiresAt: number; revoked: boolean; spent: boolean }
 interface TaskState { binding: string; expiresAt: number; requestDigest: string; taskBytes: number; spent: boolean }
 const credentials = new WeakMap<object, CredentialState>();
 const tasks = new WeakMap<object, TaskState>();
 const preparations = new WeakMap<object, { contract: CodexWorkerContract; credential: object; task: object; endpoint: ProviderEndpointPolicy }>();
+interface NetworkState { preparation: object; scope: string; expiresAt: number; spent: boolean; revoked: boolean }
+const networks = new WeakMap<object, NetworkState>();
 function stateOf<T>(map: WeakMap<object, T>, value: unknown): T {
   const state = value && typeof value === 'object' ? map.get(value) : undefined;
   if (!state) throw new Error('Missing or forged Main preparation authority');
   return state;
 }
-/** Keep issuer in Main. No credential bytes or actual handoff are accepted here. */
+/** Issuer-local capabilities support inert mechanics only, never real provider authority. */
 export function createProviderExecutionIssuer() {
   const owned = new WeakSet<object>();
+  const provenance = new WeakMap<object, { scope: string; expiresAt: number; spent: boolean }>();
   return Object.freeze({
-    mintCredential(contract: CodexWorkerContract, authorization: ProviderCredentialAuthorization): object {
+    createSyntheticProvenance(contract: CodexWorkerContract, expiresAt: number): object {
+      expiry(expiresAt);
+      const capability = opaqueCapability();
+      provenance.set(capability, { scope: providerCredentialScopeDigest(contract), expiresAt, spent: false });
+      return capability;
+    },
+    mintCredential(contract: CodexWorkerContract, authorization: ProviderCredentialAuthorization, capability: object): object {
+      const source = stateOf(provenance, capability);
+      expiry(source.expiresAt);
+      if (source.spent || source.scope !== providerCredentialScopeDigest(contract)) throw new Error('Invalid synthetic provenance scope');
       keys(record(authorization), ['recordId', 'grantedBy', 'purpose', 'scopeDigest', 'endpointOrigin', 'expiresAt']);
       expiry(authorization.expiresAt);
       if (!/^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/.test(authorization.recordId)
-        || authorization.grantedBy !== 'HUMAN' || authorization.purpose !== 'PROVIDER_EXECUTION'
-        || authorization.scopeDigest !== providerCredentialScopeDigest(contract)) throw new Error('Invalid Human authorization scope');
+        || authorization.grantedBy !== 'SYNTHETIC_ONLY' || authorization.purpose !== 'PROVIDER_EXECUTION'
+        || authorization.expiresAt > source.expiresAt
+        || authorization.scopeDigest !== providerCredentialScopeDigest(contract)) throw new Error('Invalid synthetic authorization scope');
       prepareProviderEndpoint(authorization.endpointOrigin);
       const handle = opaqueCapability();
       credentials.set(handle, { binding: binding(contract), authorization: Object.freeze({ ...authorization }),
-        expiresAt: authorization.expiresAt, revoked: false, spent: false });
+        material: Buffer.from('INERT_NON_SECRET_CREDENTIAL', 'ascii'), expiresAt: authorization.expiresAt, revoked: false, spent: false });
+      source.spent = true;
       owned.add(handle);
       return handle;
     },
     revoke(handle: object): void {
       if (!owned.has(handle)) throw new Error('Foreign credential authority');
-      stateOf(credentials, handle).revoked = true;
+      const credential = stateOf(credentials, handle);
+      credential.material.fill(0);
+      credential.revoked = true;
     },
     mintTask(contract: CodexWorkerContract, request: Buffer, expiresAt: number): object {
       expiry(expiresAt);
@@ -134,7 +150,21 @@ export function createProviderExecutionIssuer() {
       const snapshot = JSON.parse(JSON.stringify(contract)) as CodexWorkerContract;
       preparations.set(preparation, { contract: snapshot, credential, task, endpoint: prepareProviderEndpoint(origin) });
       assertProviderExecutionPreparation(preparation, contract);
+      owned.add(preparation);
       return preparation;
+    },
+    mintInertNetworkAuthority(preparation: object, contract: CodexWorkerContract, expiresAt: number): object {
+      if (!owned.has(preparation)) throw new Error('Foreign preparation authority');
+      assertProviderExecutionPreparation(preparation, contract);
+      expiry(expiresAt);
+      const capability = opaqueCapability();
+      networks.set(capability, { preparation, scope: providerCredentialScopeDigest(contract), expiresAt, spent: false, revoked: false });
+      owned.add(capability);
+      return capability;
+    },
+    revokeNetworkAuthority(capability: object): void {
+      if (!owned.has(capability)) throw new Error('Foreign network authority');
+      stateOf(networks, capability).revoked = true;
     }
   });
 }
@@ -144,38 +174,80 @@ export function assertProviderExecutionPreparation(value: unknown, contract: Cod
   const task = stateOf(tasks, preparation.task);
   expiry(credential.expiresAt); expiry(task.expiresAt);
   if (credential.authorization.scopeDigest !== providerCredentialScopeDigest(contract)
-    || credential.authorization.endpointOrigin !== preparation.endpoint.origin) throw new Error('Conflicting Human authorization scope');
+    || credential.authorization.endpointOrigin !== preparation.endpoint.origin) throw new Error('Conflicting synthetic authorization scope');
   if (credential.revoked || credential.spent || task.spent || binding(preparation.contract) !== binding(contract)
     || credential.binding !== binding(contract) || task.binding !== binding(contract))
     throw new Error('Revoked, spent or conflicting preparation authority');
 }
-/**
- * Called after filesystem reproof and before any launch effect. Deliberately cannot
- * authorize a provider.
- *
- * Once-only launch consumption: request digest/schema and endpoint/environment are
- * re-proved first, then credential and task authority are spent together, and only
- * then is the unavailable backend refused. A refused backend attempt therefore
- * consumes the authority by design — spending happens before the deliberate throw —
- * so this capability is exactly one attempt and a retry requires freshly minted
- * Human/Main authorization. Revoked, expired, forged or substituted inputs fail
- * before this point and consume nothing. A future real backend must therefore treat
- * these two flags as the already-recorded single consumption of this attempt rather
- * than spending a second time.
- */
-export function consumeProviderExecutionPreparation(value: unknown, contract: CodexWorkerContract,
-  request: Buffer, env: Readonly<Record<string, string>>): never {
+
+export interface ProviderBackendDescriptor {
+  readonly schema: 'PROVIDER_BACKEND'; readonly version: 1;
+  readonly disposition: 'PROVIDER_FREE_INERT'; readonly shell: false;
+  readonly args: readonly string[]; readonly endpoint: ProviderEndpointPolicy; readonly codexHome: string;
+  readonly framing: 'EXACT_BYTES_THEN_EOF'; readonly ioMode: 'RAW_PIPE';
+  readonly credentialDisposition: 'SYNTHETIC_ONLY';
+  readonly configurationUse: 'EVIDENCE_ONLY_NOT_APPLIED_TO_INERT_EXECUTABLE'; readonly providerCliProof: 'NOT_RUN';
+}
+export interface ProviderExecutionEvidence {
+  readonly schema: 'PROVIDER_EXECUTION'; readonly version: 1;
+  readonly recordId: string; readonly authorizationDigest: string; readonly scopeDigest: string;
+  readonly endpoint: string; readonly expiresAt: number;
+  readonly candidateId: string; readonly taskId: string; readonly runId: string;
+  readonly workerId: string; readonly taskDigest: string;
+  readonly backendDescriptor: ProviderBackendDescriptor;
+  readonly backendDescriptorDigest: string;
+}
+/** Public evidence is a frozen projection; opaque authority and task bytes never escape. */
+export function providerExecutionEvidence(value: unknown, contract: CodexWorkerContract): ProviderExecutionEvidence {
   assertProviderExecutionPreparation(value, contract);
+  const preparation = stateOf(preparations, value);
+  const { authorization } = stateOf(credentials, preparation.credential);
+  const backendDescriptor = describeProviderBackend(value, contract);
+  return Object.freeze({ schema: 'PROVIDER_EXECUTION', version: 1,
+    recordId: authorization.recordId, authorizationDigest: digest(Buffer.from(JSON.stringify(authorization))),
+    scopeDigest: authorization.scopeDigest, endpoint: preparation.endpoint.origin, expiresAt: authorization.expiresAt,
+    candidateId: contract.candidateId, taskId: contract.taskId, runId: contract.runId,
+    workerId: contract.workerId, taskDigest: contract.taskDigest, backendDescriptor,
+    backendDescriptorDigest: digest(Buffer.from(JSON.stringify(backendDescriptor))) });
+}
+/** Reproof is complete before the three capabilities are atomically spent. No process is launched. */
+export function assertProviderNetworkAuthority(value: unknown, preparation: unknown, contract: CodexWorkerContract): void {
+  if (value === undefined) throw new Error('BLOCKED_BACKEND_REQUIREMENT: provider network authority is absent');
+  const network = stateOf(networks, value);
+  expiry(network.expiresAt);
+  if (network.revoked || network.spent || network.preparation !== preparation
+    || network.scope !== providerCredentialScopeDigest(contract)) throw new Error('Invalid or spent provider network authority');
+}
+export function describeProviderBackend(value: unknown, contract: CodexWorkerContract): ProviderBackendDescriptor {
+  assertProviderExecutionPreparation(value, contract);
+  const { endpoint } = stateOf(preparations, value);
+  const args = Object.freeze(['--ignore-user-config', '--ask-for-approval', 'never', '--sandbox', 'workspace-write',
+    '-c', 'model_provider="munder"', '-c', 'model_providers.munder.name="Munder"',
+    '-c', `model_providers.munder.base_url=${JSON.stringify(endpoint.origin + '/v1')}`,
+    '-c', 'model_providers.munder.wire_api="responses"', 'exec', '-']);
+  return Object.freeze({ schema: 'PROVIDER_BACKEND', version: 1, disposition: 'PROVIDER_FREE_INERT',
+    shell: false, args, endpoint, codexHome: contract.rootPolicy.codexHomeDir,
+    framing: 'EXACT_BYTES_THEN_EOF', ioMode: 'RAW_PIPE', credentialDisposition: 'SYNTHETIC_ONLY',
+    configurationUse: 'EVIDENCE_ONLY_NOT_APPLIED_TO_INERT_EXECUTABLE', providerCliProof: 'NOT_RUN' } as const);
+}
+export function consumeProviderExecutionPreparation(value: unknown, contract: CodexWorkerContract,
+  request: Buffer, env: Readonly<Record<string, string>>, networkAuthority?: unknown) {
+  assertProviderExecutionPreparation(value, contract);
+  assertProviderNetworkAuthority(networkAuthority, value, contract);
   const preparation = stateOf(preparations, value);
   const credential = stateOf(credentials, preparation.credential);
   const task = stateOf(tasks, preparation.task);
   if (digest(request) !== task.requestDigest) throw new Error('Task request substitution');
-  readProviderTaskDocument(request, contract);
+  const taskBytes = readProviderTaskDocument(request, contract);
   enforceProviderEndpoint(preparation.endpoint, preparation.endpoint.origin, env);
-  // Atomically spend both authorities immediately before the deliberate backend refusal.
+  const descriptor = describeProviderBackend(value, contract);
+  // Strings are immutable; consumers recreate the exact UTF-8 bytes without exposing credential material.
+  const consumed = Object.freeze({ descriptor, taskText: taskBytes.toString('utf8'), taskDigest: contract.taskDigest });
+  credential.material.fill(0);
   credential.spent = true;
   task.spent = true;
-  throw new Error('BLOCKED_BACKEND_REQUIREMENT: dedicated credential handoff, endpoint configuration enforcement and provider network authority are unavailable');
+  stateOf(networks, networkAuthority).spent = true;
+  return consumed;
 }
 
 /** Bound future transport contract only; no PTY write API or executable delivery backend. */
@@ -184,7 +256,7 @@ export function describeProviderTaskTransport(value: unknown, contract: CodexWor
   const task = stateOf(tasks, stateOf(preparations, value).task);
   return Object.freeze({ encoding: 'utf8', bytes: task.taskBytes, taskDigest: contract.taskDigest,
     requestDigest: task.requestDigest, shell: false, framing: 'EXACT_BYTES_THEN_EOF',
-    backend: 'NOT_IMPLEMENTED', execution: 'BLOCKED_BACKEND_REQUIREMENT' } as const);
+    backend: 'IMPLEMENTED_INERT_ONLY', execution: 'BLOCKED_WITHOUT_NETWORK_CAPABILITY' } as const);
 }
 
 /** Refuse, never redact into a potentially misleading PASS. This is not universal secret detection. */

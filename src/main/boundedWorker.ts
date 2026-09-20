@@ -28,7 +28,7 @@ import {
 import { buildCodexWorkerEnv, validateCodexWorkerEnv, type CodexWorkerEnvironmentInput } from './ptyEnv';
 import type { OwnedPtyLaunch, OwnedPtyReceipt } from './windowsOwnedPty';
 import { consumeProviderWorkerBridge } from './providerWorker';
-import { assertNoProviderSecretContent, consumeProviderExecutionPreparation, readProviderTaskDocument } from './providerExecutionPreparation';
+import { assertNoProviderSecretContent, consumeProviderExecutionPreparation, readProviderTaskDocument, type ProviderExecutionEvidence } from './providerExecutionPreparation';
 
 /** Host acceptance receipt schema, written once per accepted identity. */
 export const BOUNDED_WORKER_ACCEPTANCE_VERSION = 1 as const;
@@ -208,7 +208,7 @@ export function classifyBoundedWorkerRecovery(
   if ('error' in acceptance) return decision('RECONCILIATION_REQUIRED', 'PUBLICATION_OR_ACCEPTANCE_FAILURE');
   if (acceptance.outcome === 'DUPLICATE') return decision('RECONCILIATION_REQUIRED', 'DUPLICATE_OR_CONFLICT');
   if (native.activeProcessesFinal !== 0 || native.cleanupState !== 'VERIFIED_EMPTY'
-    || !native.ioDrained || !native.pseudoConsoleClosed) return decision('RECONCILIATION_REQUIRED', 'CLEANUP_UNVERIFIED');
+    || !native.ioDrained || (native.ioMode === 'RAW_PIPE' ? !native.inputClosed : !native.pseudoConsoleClosed)) return decision('RECONCILIATION_REQUIRED', 'CLEANUP_UNVERIFIED');
   if (acceptance.outcome === 'ACCEPTED') {
     if (acceptance.result.result === 'PASS' && native.rootExit !== 0) return decision('RECONCILIATION_REQUIRED', 'PASS_EXIT_CONFLICT');
     if (acceptance.result.result === 'FAIL') return decision('TERMINAL', 'DURABLE_FAIL');
@@ -268,6 +268,10 @@ interface PreparedState {
   readonly contract: CodexWorkerContract;
   readonly limits: BoundedWorkerLimits;
   readonly providerExecution?: unknown;
+  readonly providerNetworkAuthority?: unknown;
+  readonly providerEvidence?: ProviderExecutionEvidence;
+  taskInput?: Buffer;
+  inputDelivered?: boolean;
   readonly env: Readonly<Record<string, string>>;
   published: boolean;
   readonly facts: PreparedFacts;
@@ -716,7 +720,7 @@ export function prepareBoundedWorker(permit: BoundedWorkerPermit, providerBridge
   }
   const launch: OwnedPtyLaunch = Object.freeze({
     ...backend, executablePath, executableSha256: contract.executable.executableSha256,
-    args, cwd: rootPolicy.workDir, env
+    args, cwd: rootPolicy.workDir, env, ioMode: provider ? 'RAW_PIPE' : 'CONPTY'
   });
 
   const binding = {
@@ -727,7 +731,7 @@ export function prepareBoundedWorker(permit: BoundedWorkerPermit, providerBridge
     scriptPath, scriptSha256, mode, argv: args,
     cwd: rootPolicy.workDir, env, syntheticRoot, resultPath: rootPolicy.resultPath, artifactDir: rootPolicy.artifactDir,
     hostReceiptDir, limits, backend,
-    ...(provider ? { providerAdmission: provider.admission, launchAuthority: 'AUTHORIZED', expiresAt: bridge!.expiresAt } : {})
+    ...(provider ? { providerAdmission: provider.admission, providerEvidence: bridge!.evidence, ioMode: 'RAW_PIPE', launchAuthority: 'AUTHORIZED', expiresAt: bridge!.expiresAt } : {})
   };
   const bindingDigest = createHash('sha256').update(JSON.stringify(binding), 'utf8').digest('hex');
   const receiptPath = join(hostReceiptDir, `bounded-worker-${bindingDigest}.json`);
@@ -740,7 +744,9 @@ export function prepareBoundedWorker(permit: BoundedWorkerPermit, providerBridge
 
   const state: PreparedState = {
     expiresAt: permit.expiresAt, bindingDigest, permitId, contract, limits,
-    providerExecution: bridge?.execution, env, published: false,
+    providerExecution: bridge?.execution, providerNetworkAuthority: bridge?.networkAuthority, env, published: false,
+    providerEvidence: bridge?.evidence,
+    taskInput: provider ? readProviderTaskDocument(requestDocument, contract) : undefined,
     requestPath, syntheticRoot, resultPath: rootPolicy.resultPath, artifactDir: rootPolicy.artifactDir,
     receiptPath,
     digests: Object.freeze([
@@ -803,7 +809,7 @@ function assertLaunchPreconditions(state: PreparedState): void {
   if (existsSync(state.resultPath)) throw new Error('Bounded worker durable result slot must be empty before launch');
   if (existsSync(state.receiptPath)) throw new Error('Bounded worker acceptance already exists for this binding');
   if (state.providerExecution !== undefined) {
-    consumeProviderExecutionPreparation(state.providerExecution, state.contract, requestBytes, state.env);
+    consumeProviderExecutionPreparation(state.providerExecution, state.contract, requestBytes, state.env, state.providerNetworkAuthority);
   }
 }
 
@@ -816,6 +822,19 @@ export function consumePreparedBoundedWorker(value: unknown): PreparedBoundedWor
   assertLaunchPreconditions(state);
   state.launched = true;
   return value;
+}
+
+/** Only the consumed minted preparation can deliver task bytes. Generic PTY writes never call this seam. */
+export function deliverPreparedProviderInput(value: unknown, transport: { input(bytes: Uint8Array): void; closeInput(): void }): void {
+  assertPreparedBoundedWorker(value);
+  const state = MINTED.get(value)!;
+  if (state.providerExecution === undefined) return;
+  if (!state.launched || state.accepted || state.inputDelivered || !state.taskInput) throw new Error('Provider input is not live');
+  state.inputDelivered = true;
+  const bytes = state.taskInput;
+  state.taskInput = undefined;
+  try { transport.input(bytes); transport.closeInput(); }
+  finally { bytes.fill(0); }
 }
 
 /** Trusted Main adapter only: terminal text and exit callbacks never call this publisher.
@@ -843,6 +862,7 @@ interface NativeObservation {
   readonly rootPid: number | null; readonly rootExit: number | null; readonly rootJobMember: boolean;
   readonly activeProcessesFinal: number | null; readonly cleanupState: 'VERIFIED_EMPTY' | 'UNVERIFIED';
   readonly ioDrained: boolean; readonly pseudoConsoleClosed: boolean; readonly reason: OwnedPtyReceipt['reason'];
+  readonly ioMode: 'CONPTY' | 'RAW_PIPE'; readonly inputClosed: boolean;
   readonly error?: string;
 }
 const NATIVE_REASONS: readonly OwnedPtyReceipt['reason'][] = Object.freeze(['exit', 'stop', 'timeout', 'helper-failure', 'launch-failure']);
@@ -858,7 +878,11 @@ function readNativeObservation(receipt: OwnedPtyReceipt): NativeObservation {
   if (typeof receipt.ioDrained !== 'boolean' || typeof receipt.pseudoConsoleClosed !== 'boolean') throw new Error('Invalid owned PTY drain flags');
   if (typeof receipt.reason !== 'string' || !NATIVE_REASONS.includes(receipt.reason)) throw new Error('Invalid owned PTY reason');
   if (receipt.error !== undefined && typeof receipt.error !== 'string') throw new Error('Invalid owned PTY error');
+  const ioMode = receipt.ioMode ?? 'CONPTY';
+  if (ioMode !== 'CONPTY' && ioMode !== 'RAW_PIPE') throw new Error('Invalid owned I/O mode');
+  if (ioMode === 'RAW_PIPE' && (typeof receipt.inputClosed !== 'boolean' || receipt.pseudoConsoleClosed)) throw new Error('Invalid raw closure');
   return Object.freeze({
+    ioMode, inputClosed: receipt.inputClosed === true,
     rootPid, rootExit, rootJobMember: receipt.rootJobMember, activeProcessesFinal,
     cleanupState: receipt.cleanupState, ioDrained: receipt.ioDrained, pseudoConsoleClosed: receipt.pseudoConsoleClosed,
     reason: receipt.reason, ...(receipt.error === undefined ? {} : { error: receipt.error })
@@ -952,7 +976,8 @@ function acceptBoundedWorkerResult(prepared: PreparedBoundedWorker, receipt: Own
   }
   // Job verified empty + I/O drained + pseudo console closed: nothing is read before this holds.
   if (!native.rootJobMember || native.activeProcessesFinal !== 0 || native.cleanupState !== 'VERIFIED_EMPTY'
-    || !native.ioDrained || !native.pseudoConsoleClosed) {
+    || !native.ioDrained || native.ioMode !== (state.providerExecution === undefined ? 'CONPTY' : 'RAW_PIPE')
+    || (native.ioMode === 'RAW_PIPE' ? !native.inputClosed : !native.pseudoConsoleClosed)) {
     return Object.freeze({ outcome: 'INVALID', reason: 'native cleanup is not verified empty, drained, and closed', bindingDigest });
   }
 
@@ -994,6 +1019,7 @@ function acceptBoundedWorkerResult(prepared: PreparedBoundedWorker, receipt: Own
     : classifyTerminal({ durableResult: result.result, processExitCode: native.rootExit, cleanup: native.cleanupState });
   const body = {
     version: BOUNDED_WORKER_ACCEPTANCE_VERSION, permitId: state.permitId, bindingDigest,
+    ...(state.providerEvidence ? { providerEvidence: state.providerEvidence } : {}),
     candidateId: result.candidateId, taskId: result.taskId, runId: result.runId, workerId: result.workerId,
     taskDigest: result.taskDigest, sourceCheckpoint: result.sourceCheckpoint,
     requestSha256: state.facts.requestSha256, executableSha256: state.facts.executableSha256,
@@ -1006,6 +1032,7 @@ function acceptBoundedWorkerResult(prepared: PreparedBoundedWorker, receipt: Own
       rootPid: native.rootPid, rootExit: native.rootExit, rootJobMember: native.rootJobMember,
       activeProcessesFinal: native.activeProcessesFinal, cleanupState: native.cleanupState,
       ioDrained: native.ioDrained, pseudoConsoleClosed: native.pseudoConsoleClosed, reason: native.reason,
+      ioMode: native.ioMode, inputClosed: native.inputClosed,
       ...(native.error === undefined ? {} : { error: native.error })
     },
     acceptedAt: new Date().toISOString()

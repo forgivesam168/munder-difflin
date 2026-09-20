@@ -8,7 +8,7 @@ import { expandTilde } from './fs';
 import { buildPtyEnv } from './ptyEnv';
 import { captureFromLoginShell, isSafeCommandName, userShellPath } from './shellEnv';
 import { launchOwnedPty, type OwnedPtyReceipt } from './windowsOwnedPty';
-import { classifyBoundedWorkerRecovery, consumePreparedBoundedWorker, type BoundedWorkerAcceptance, type BoundedWorkerAcceptanceError, type PreparedBoundedWorker } from './boundedWorker';
+import { classifyBoundedWorkerRecovery, consumePreparedBoundedWorker, deliverPreparedProviderInput, type BoundedWorkerAcceptance, type BoundedWorkerAcceptanceError, type PreparedBoundedWorker } from './boundedWorker';
 
 /** APPEND the hive's bundled-node dir (`<HIVE_ROOT>/bin/runtime`, which holds a
  *  shim literally named `node`) to a child's PATH.
@@ -759,6 +759,11 @@ export class PtyManager {
         }
       });
       session.owned = { completion: handle.completion, stopping: false };
+      try { deliverPreparedProviderInput(prepared, handle); }
+      catch (error) {
+        handle.stop();
+        return { ok: false, error: error instanceof Error ? error.message : String(error) };
+      }
       return { ok: true };
     } catch (error) {
       this.sessions.delete(opts.id);

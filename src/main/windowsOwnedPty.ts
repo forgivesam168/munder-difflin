@@ -5,6 +5,7 @@ import { resolve } from 'node:path';
 import { StringDecoder } from 'node:string_decoder';
 
 export interface OwnedPtyLaunch {
+  ioMode?: 'CONPTY' | 'RAW_PIPE';
   helperPath: string;
   helperSha256: string;
   scriptPath: string;
@@ -24,6 +25,8 @@ export interface OwnedPtyLaunch {
 }
 
 export interface OwnedPtyReceipt {
+  ioMode?: 'CONPTY' | 'RAW_PIPE';
+  inputClosed?: boolean;
   rootPid: number | null;
   rootExit: number | null;
   rootJobMember: boolean;
@@ -42,7 +45,7 @@ interface OwnedPtyCallbacks {
 }
 
 interface ControlFrame {
-  type: 'write' | 'resize' | 'stop';
+  type: 'write' | 'resize' | 'stop' | 'input' | 'close-input';
   data?: string;
   cols?: number;
   rows?: number;
@@ -78,6 +81,7 @@ const HELPER_ENV_KEYS: Readonly<Record<string, true>> = {
 
 function failedReceipt(reason: OwnedPtyReceipt['reason'], error: string): OwnedPtyReceipt {
   return {
+    ioMode: 'CONPTY', inputClosed: false,
     rootPid: null,
     rootExit: null,
     rootJobMember: false,
@@ -185,11 +189,16 @@ export function launchOwnedPty(
   input: OwnedPtyLaunch,
   callbacks: OwnedPtyCallbacks
 ): {
+  input(bytes: Uint8Array): void;
+  closeInput(): void;
   write(data: string): void;
   resize(cols: number, rows: number): void;
   stop(): void;
   completion: Promise<OwnedPtyReceipt>;
 } {
+  const ioMode = input.ioMode ?? 'CONPTY';
+  if (ioMode !== 'CONPTY' && ioMode !== 'RAW_PIPE') throw new Error('Invalid I/O mode');
+  let inputClosed = false;
   let pendingReceipt: OwnedPtyReceipt | null = null;
   let startedPid: number | null = null;
   let child: ChildProcessWithoutNullStreams | null = null;
@@ -230,6 +239,7 @@ export function launchOwnedPty(
   const fail = (reason: OwnedPtyReceipt['reason'], error: string): void => {
     if (settled || pendingReceipt) return;
     const receipt = failedReceipt(reason, error);
+    receipt.ioMode = ioMode;
     receipt.rootPid = startedPid;
     pendingReceipt = receipt;
     stopHelper();
@@ -301,7 +311,12 @@ export function launchOwnedPty(
       return;
     }
     if (frame.type === 'exit') {
-      try { pendingReceipt = validateReceipt(frame.receipt); } catch (error) {
+      try {
+        const receipt = validateReceipt(frame.receipt);
+        if (receipt.ioMode !== ioMode || typeof receipt.inputClosed !== 'boolean'
+          || (ioMode === 'RAW_PIPE' && receipt.pseudoConsoleClosed)) throw new Error('invalid I/O mode receipt');
+        pendingReceipt = receipt;
+      } catch (error) {
         fail('helper-failure', error instanceof Error ? error.message : String(error));
         return;
       }
@@ -346,7 +361,7 @@ export function launchOwnedPty(
 
   const launch = {
     helperPath, helperSha256, scriptPath, scriptSha256, nativeSourcePath, nativeSourceSha256,
-    executablePath, executableSha256, args, cwd, env, cols, rows, timeoutMs, cleanupMs
+    executablePath, executableSha256, args, cwd, env, cols, rows, timeoutMs, cleanupMs, ioMode
   };
   const initial = `${JSON.stringify(launch)}\n`;
   if (Buffer.byteLength(initial) > MAX_INITIAL_BYTES) throw new Error('initial launch frame exceeds bounded protocol size');
@@ -361,8 +376,11 @@ export function launchOwnedPty(
     });
   } catch (error) {
     const receipt = failedReceipt('launch-failure', `helper launch failed: ${error instanceof Error ? error.message : String(error)}`);
+    receipt.ioMode = ioMode;
     queueMicrotask(() => finish(receipt));
     return {
+      input(): void { throw new Error('Launch failed'); },
+      closeInput(): void { throw new Error('Launch failed'); },
       write(): void { /* launch already failed */ },
       resize(): void { /* launch already failed */ },
       stop(): void { /* launch already failed */ },
@@ -426,7 +444,20 @@ export function launchOwnedPty(
   outerTimer = setTimeout(() => fail('helper-failure', 'helper exceeded the bounded outer lifetime'), timeoutMs + cleanupMs + 10_000);
 
   return {
+    input(bytes: Uint8Array): void {
+      if (ioMode !== 'RAW_PIPE' || inputClosed || settled || pendingReceipt) throw new Error('Raw input unavailable');
+      if (!(bytes instanceof Uint8Array) || !bytes.byteLength || bytes.byteLength > 65_536) throw new Error('Invalid raw input bounds');
+      const buffer = Buffer.from(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+      for (let offset = 0; offset < buffer.length; offset += 24 * 1024)
+        send({ type: 'input', data: buffer.subarray(offset, offset + 24 * 1024).toString('base64') });
+    },
+    closeInput(): void {
+      if (ioMode !== 'RAW_PIPE' || inputClosed || settled || pendingReceipt) throw new Error('Raw input unavailable');
+      inputClosed = true;
+      send({ type: 'close-input' });
+    },
     write(data: string): void {
+      if (ioMode !== 'CONPTY') throw new Error('Generic write cannot deliver raw input');
       if (typeof data !== 'string') { fail('helper-failure', 'write data must be a string'); return; }
       const bytes = Buffer.from(data, 'utf8');
       if (bytes.length === 0) return;
@@ -435,6 +466,7 @@ export function launchOwnedPty(
       }
     },
     resize(cols: number, rows: number): void {
+      if (ioMode !== 'CONPTY') throw new Error('RAW_PIPE cannot resize');
       send({
         type: 'resize',
         cols: validateInteger(cols, 1, 32767, 'cols'),
