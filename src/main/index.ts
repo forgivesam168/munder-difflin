@@ -66,7 +66,7 @@ import * as integrations from './integrations';
 import { validateBaseUrl, buildAuthHeaders, resolveUpstreamUrl, secretRefFor, INTEGRATION_TEMPLATES } from '../shared/integrations';
 import { RosterStore } from './roster';
 import { buildWorkerLaunch } from './workerLaunch';
-import { decideProviderWorkerLaunch } from './providerWorker';
+import { createProviderWorkerBridge } from './providerWorker';
 import { ControlRegistry } from './control';
 import { WorkerWakeWatchdog, type WorkerWakeFacts } from './workerWake';
 import { inboxNudgeText } from '../shared/hiveNudge';
@@ -2550,23 +2550,22 @@ ipcMain.handle('pty:spawn', async (evt, opts: AgentSpawnOptions) => {
  *  it can ALSO be invoked by the god-triggered ephemeral-worker watcher (which has
  *  no renderer `evt`). `owner` is the window that should receive this PTY's output
  *  (null → the primary window). Behavior-identical to the prior inline handler. */
-async function spawnAgentCore(opts: AgentSpawnOptions, owner: Electron.WebContents | null): Promise<{ ok: boolean; error?: string; cwd?: string; worktreePath?: string; resumeNotFound?: boolean; resumed?: boolean; seedPrompt?: string }> {
-  // ── PROVIDER PREFLIGHT — the fail-closed ingestion seam ─────────────────────
-  // A Main-minted provider preflight is authenticated BY IDENTITY here, BEFORE the
-  // bounded branch and BEFORE every generic spawn effect below (cwd expansion,
-  // provider inference, the missing-CLI installer, worktree isolation, hive
-  // provisioning, env construction, remote, and the final PTY spawn). A forged or
-  // structural object throws and is refused; a genuine BLOCKED or even all-evidence
-  // READY preflight returns fail-closed, because this slice grants NO launch
-  // authority — the launch bridge to the bounded owned runtime does not exist yet.
-  // This branch NEVER calls PtyManager, spawnAgentCore recursively, a provider CLI,
-  // or any generic path: it returns a result and nothing else.
+// This issuer is never exported, serialized, or populated from spawn request data.
+const providerWorkerBridge = createProviderWorkerBridge();
+
+async function spawnAgentCore(opts: AgentSpawnOptions, owner: Electron.WebContents | null, providerBridgeAuthority?: object): Promise<{ ok: boolean; error?: string; cwd?: string; worktreePath?: string; resumeNotFound?: boolean; resumed?: boolean; seedPrompt?: string }> {
+  // Preflight and separate Main-held authority are authenticated before any generic effect.
+  // Production callers supply no authority: even READY remains fail-closed.
   if (opts.providerWorkerPreflight !== undefined) {
     try {
-      return { ok: false, error: decideProviderWorkerLaunch(opts.providerWorkerPreflight).reason };
+      const boundedWorker = providerWorkerBridge.prepare(opts.providerWorkerPreflight, providerBridgeAuthority);
+      opts = { id: boundedWorker.contract.workerId, cwd: boundedWorker.cwd,
+        command: boundedWorker.executablePath, boundedWorker };
     } catch (error) {
       return { ok: false, error: error instanceof Error ? error.message : String(error) };
     }
+  } else if (providerBridgeAuthority !== undefined) {
+    return { ok: false, error: 'Provider bridge authority requires its bound preflight' };
   }
   // Main-minted bounded preparations bypass installers, broker grants, hive
   // provisioning and host-environment construction. IPC cannot mint admission.

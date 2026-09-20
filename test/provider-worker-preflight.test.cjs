@@ -440,33 +440,56 @@ test('every blocked case is fail-closed: no decision may be READY and nothing is
   }
 });
 
-test('the seam never loads the owned runtime, the PTY layer, or a process API', () => {
-  // Static proof of self-containment: no process, filesystem, credential,
-  // network, or owned-runtime import exists in the module, so there is no
-  // reachable path from preflight to a launch even by accident.
-  const moduleSource = require('node:fs').readFileSync(
-    path.join(__dirname, '..', 'src', 'main', 'providerWorker.ts'), 'utf8'
-  );
-  for (const forbidden of ['node:child_process', 'node:fs', 'node:os', 'node:net', 'node:http', 'node:https', 'electron', "from './boundedWorker'", "from './pty'", "from './windowsOwnedPty'"]) {
-    assert.ok(!moduleSource.includes(forbidden), `providerWorker.ts must not reference ${forbidden}`);
-  }
-  // The only imports are the accepted pure contract, environment, and launch builders.
-  assert.deepEqual(
-    [...moduleSource.matchAll(/from '([^']+)'/g)].map(match => match[1]).sort(),
-    ['./codexWorkerContract', './ptyEnv', './workerLaunch']
-  );
-  // And its whole public surface is the preflight API: minting, identity
-  // assertion/inspection, and the non-launching decision helper. No launch entry point exists.
-  assert.deepEqual(Object.keys(preflightApi).sort(), [
-    'PROVIDER_PREFLIGHT_SCHEMA_VERSION',
-    'assertProviderWorkerPreflight',
-    'decideProviderWorkerLaunch',
-    'inspectProviderWorkerPreflight',
-    'prepareProviderBackedWorker'
-  ]);
-  for (const forbidden of ['prepareBoundedWorker', 'launchOwnedPty', 'consumePreparedBoundedWorker']) {
-    assert.ok(!(forbidden in preflightApi), `providerWorker.ts must not export ${forbidden}`);
-  }
+test('bridge refuses absent authority and structural preflights without effects', () => {
+  const bridge = preflightApi.createProviderWorkerBridge();
+  const ready = prepareProviderBackedWorker(allEvidenceInput());
+  const witnessed = withInvocationWitness(() => {
+    for (const input of [unauthorizedInput(), allEvidenceInput({ credentials: unauthorizedInput().credentials }),
+      allEvidenceInput({ network: { ...allEvidenceInput().network, providerNetworkAuthority: 'NOT_AUTHORIZED' } }),
+      allEvidenceInput({ network: { ...allEvidenceInput().network, endpointEnforcement: 'OPEN_DECISION' } })]) {
+      const preflight = prepareProviderBackedWorker(input);
+      assert.throws(() => bridge.authorize(preflight, {}, 'AUTHORIZED'), /BLOCKED/);
+      assert.throws(() => bridge.prepare(preflight, {}), /BLOCKED/);
+    }
+    assert.throws(() => bridge.authorize(ready, {}, undefined), /invocation authority/);
+    for (const fake of [{}, { ...ready }, JSON.parse(JSON.stringify(ready))]) {
+      assert.throws(() => bridge.authorize(fake, {}, 'AUTHORIZED'), /not minted/);
+      assert.throws(() => bridge.prepare(fake, {}), /not minted/);
+    }
+    assert.throws(() => bridge.prepare(ready, undefined), /authority is absent/);
+    const ticket = bridge.authorize(ready, {}, 'AUTHORIZED');
+    for (const fake of [{}, { ...ticket }, JSON.parse(JSON.stringify(ticket))]) {
+      assert.throws(() => bridge.prepare(ready, fake), /authority is absent/);
+    }
+    assert.throws(() => preflightApi.createProviderWorkerBridge().prepare(ready, ticket), /authority is absent/);
+    assert.throws(() => bridge.prepare(prepareProviderBackedWorker(allEvidenceInput()), ticket), /does not match/);
+    const bounded = loadTs('src/main/boundedWorker.ts');
+    assert.throws(() => bounded.prepareBoundedWorker({}, { preflight: ready }), /not minted/);
+    assert.throws(() => bounded.consumePreparedBoundedWorker({ contract: ready.contract }), /not minted/);
+  });
+  assert.deepEqual(witnessed.attempts, []);
+});
+
+test('expired preflight cannot bridge and a failed preparation spends every ticket for that preflight', () => {
+  const bridge = preflightApi.createProviderWorkerBridge();
+  const ready = prepareProviderBackedWorker(allEvidenceInput());
+  const ticket = bridge.authorize(ready, {}, 'AUTHORIZED');
+  const originalNow = Date.now;
+  try {
+    Date.now = () => permit.expiresAt + 1;
+    assert.throws(() => bridge.prepare(ready, ticket), /expired/);
+  } finally { Date.now = originalNow; }
+  const second = bridge.authorize(ready, {}, 'AUTHORIZED');
+  const otherBridge = preflightApi.createProviderWorkerBridge();
+  const other = otherBridge.authorize(ready, {}, 'AUTHORIZED');
+  const witnessed = withInvocationWitness(() => {
+    assert.throws(() => bridge.prepare(ready, ticket), /permitId/);
+    assert.throws(() => bridge.prepare(ready, ticket), /authority is absent/);
+    assert.throws(() => bridge.prepare(ready, second), /already consumed/);
+    assert.throws(() => otherBridge.prepare(ready, other), /already consumed/);
+    assert.throws(() => bridge.authorize(ready, {}, 'AUTHORIZED'), /already consumed/);
+  });
+  assert.deepEqual(witnessed.attempts, []);
 });
 
 test('all-evidence READY shows the decision shape and still grants no launch authority', () => {
@@ -557,11 +580,10 @@ test('the production decision helper is explicit, effect-free, and never launcha
 });
 
 test('the production spawn ingestion authenticates the preflight before any generic effect', () => {
-  // The identity check above is behavioural; this asserts the ORDER that cannot be
-  // reached without loading Electron: ingestion must authenticate the preflight
-  // BEFORE the bounded branch and BEFORE every generic spawn side effect, and its
-  // branch must not call the PTY layer or recurse. The security boundary asserted
-  // here is the branch's POSITION and its absence of spawn calls — not its wording.
+  // Ingestion must authenticate the preflight and separate authority BEFORE the
+  // bounded branch and every generic spawn effect. Exercise that boundary below
+  // without loading Electron; retain source ordering and bypass checks for the
+  // effects intentionally excluded from this focused harness.
   const source = require('node:fs').readFileSync(
     path.join(__dirname, '..', 'src', 'main', 'index.ts'), 'utf8'
   );
@@ -582,11 +604,76 @@ test('the production spawn ingestion authenticates the preflight before any gene
     assert.ok(preflightAt < at, `preflight must be authenticated before ${label}`);
   }
 
-  // The preflight branch is self-contained: it returns a decision and reaches no
-  // PTY, no recursion, and no provider CLI.
+  // Exercise the production boundary without loading Electron or the generic
+  // effects below it. Keep the bounded dispatch in the extracted code so a
+  // refusal that falls through, or a preparation that retains caller options,
+  // fails observably rather than merely matching a helper's name.
+  const boundaryAt = body.indexOf('if (opts.providerWorkerPreflight !== undefined)');
+  assert.ok(boundaryAt !== -1 && boundaryAt < boundedAt);
+  const dispatchEnd = body.indexOf('\n', boundedAt);
+  assert.ok(dispatchEnd > boundedAt);
+  const ingest = new Function('opts', 'owner', 'providerBridgeAuthority',
+    'providerWorkerBridge', 'ptyManager', `${body.slice(boundaryAt, dispatchEnd)}
+      throw new Error('unexpected generic spawn effect');`);
+  const preflight = prepareProviderBackedWorker(allEvidenceInput());
+  const authority = Object.freeze({});
+  const owner = Object.freeze({});
+  const boundedWorker = Object.freeze({
+    contract: { workerId: 'bridge-worker' }, cwd: 'bridge-cwd', executablePath: 'bridge-executable'
+  });
+  const callerOptions = {
+    id: 'untrusted-id', cwd: 'untrusted-cwd', command: 'untrusted-command',
+    providerWorkerPreflight: preflight, providerBridgeAuthority: Object.freeze({ forged: true }),
+    boundedWorker: { forged: true }, env: { UNTRUSTED: 'yes' }, args: ['untrusted'],
+    hive: { cwd: 'untrusted-hive' }
+  };
+  const events = [];
+  const success = { ok: true };
+  assert.equal(ingest(callerOptions, owner, authority, {
+    prepare(value, ticket) {
+      events.push('prepare');
+      assert.equal(value, preflight, 'prepare must receive the original preflight');
+      assert.equal(ticket, authority, 'authority must come from the separate argument');
+      return boundedWorker;
+    }
+  }, {
+    spawn(options, actualOwner) {
+      events.push('bounded');
+      assert.equal(actualOwner, owner);
+      assert.deepEqual(options, {
+        id: boundedWorker.contract.workerId, cwd: boundedWorker.cwd,
+        command: boundedWorker.executablePath, boundedWorker
+      }, 'only rebuilt bounded options may reach dispatch');
+      assert.notEqual(options, callerOptions);
+      return success;
+    }
+  }), success);
+  assert.deepEqual(events, ['prepare', 'bounded']);
+
+  const noDispatch = { spawn() { assert.fail('refusal must precede bounded dispatch'); } };
+  for (const error of [new Error('bridge refused'), 'non-Error refusal']) {
+    const result = ingest(callerOptions, owner, authority, {
+      prepare() { throw error; }
+    }, noDispatch);
+    assert.deepEqual(result, { ok: false, error: error instanceof Error ? error.message : String(error) });
+  }
+  // Use the real bridge for missing/forged authority: a READY admission and an
+  // authority-shaped option must not grant invocation permission.
+  const bridge = preflightApi.createProviderWorkerBridge();
+  const witnessed = withInvocationWitness(() => {
+    for (const ticket of [undefined, authority]) {
+      const result = ingest(callerOptions, owner, ticket, bridge, noDispatch);
+      assert.equal(result.ok, false);
+      assert.match(result.error, /authority is absent or does not match preflight/);
+    }
+    const result = ingest({ ...callerOptions, providerWorkerPreflight: undefined }, owner, authority, {
+      prepare() { assert.fail('authority without preflight must be refused'); }
+    }, noDispatch);
+    assert.equal(result.ok, false);
+  });
+  assert.deepEqual(witnessed.attempts, []);
+
   const branch = body.slice(preflightAt, boundedAt);
-  assert.ok(branch.includes('decideProviderWorkerLaunch('), 'the branch must use the production decision helper');
-  assert.ok(branch.includes('ok: false'), 'the branch must fail closed');
   for (const forbidden of ['ptyManager', 'spawnAgentCore(', 'isCommandAvailable(', 'resolveCommand(']) {
     assert.ok(!branch.includes(forbidden), `the preflight branch must not reach ${forbidden}`);
   }
@@ -656,9 +743,285 @@ test('the PTY refusal is ordered before the bounded dispatch and the generic pat
     assert.ok(refusalAt < at, `the refusal must precede ${label}`);
   }
   // And the refusal is a REFUSAL only: it authenticates nothing and reaches no spawn.
-  const refusal = body.slice(refusalAt, body.indexOf('\n    if (opts.boundedWorker)'));
+  const refusal = body.slice(refusalAt, body.indexOf('    if (opts.boundedWorker)'));
   assert.ok(refusal.includes('ok: false'), 'the refusal must fail closed');
   for (const forbidden of ['decideProviderWorkerLaunch', 'assertProviderWorkerPreflight', 'pty.spawn(', 'this.sessions.set(']) {
     assert.ok(!refusal.includes(forbidden), `the refusal must not reach ${forbidden}`);
   }
+});
+
+/**
+ * The one POSITIVE path in this suite. Every case above is fail-closed; this case
+ * walks the PRODUCTION `createProviderWorkerBridge().authorize` → `prepare` seam
+ * across real repository-local fixture/native helper files far enough to receive a
+ * genuinely minted `PreparedBoundedWorker`, and stops at that boundary: it does
+ * not consume, launch, spawn, or contact anything.
+ *
+ * MOCKED/DERIVED READY IS BRIDGE MECHANICS ONLY. The READY admission constructed
+ * here is a locally derived, Main-shaped evidence record over local files; it is
+ * NOT evidence of credential provisioning, provider network authority, endpoint
+ * approval, or any provider/model request. Nothing in this case starts a process,
+ * reads a credential, opens a socket, or reaches a provider CLI. The real
+ * native/runtime evidence for the owned PTY layer is produced by
+ * test/owned-pty-runtime.test.cjs and is NOT claimed or replaced here.
+ *
+ * The transient root is left in `.tmp` as this run's evidence, matching the
+ * existing runtime-suite convention rather than deleting the artifact it proves.
+ */
+test('the production bridge reaches a minted PreparedBoundedWorker with zero invocation', () => {
+  const fs = require('node:fs');
+  const crypto = require('node:crypto');
+  const net = require('node:net');
+  const bounded = loadTs('src/main/boundedWorker.ts');
+  const repository = path.resolve(__dirname, '..');
+  const hash = file => crypto.createHash('sha256').update(fs.readFileSync(file)).digest('hex');
+  assert.equal(process.platform, 'win32', 'the owned-runtime positive path requires Windows; do not report a skipped proof as PASS');
+
+  const run = fs.mkdtempSync(path.join(repository, '.tmp', 'p-bridge-'));
+  const syntheticRootDir = path.join(run, 'worker');
+  const host = path.join(run, 'host');
+  fs.mkdirSync(syntheticRootDir);
+  fs.mkdirSync(host);
+
+  // Real approved files: the fixture script, the native helper script/source, the
+  // owned-runtime helper, and `process.execPath` as the fixture executable.
+  const helperPath = 'C:\\Program Files\\PowerShell\\7\\pwsh.exe';
+  assert.equal(fs.existsSync(helperPath), true,
+    'this case requires the same local PowerShell helper as test/owned-pty-runtime.test.cjs');
+  const fixturePath = path.join(repository, 'test', 'fixtures', 'bounded-worker.cjs');
+  const nativeScriptPath = path.join(repository, 'src', 'main', 'windowsOwnedPty.ps1');
+  const nativeSourcePath = path.join(repository, 'src', 'main', 'windowsOwnedPty.cs');
+
+  const localIdentity = {
+    candidateId: 'p-bridge-candidate-001',
+    taskId: 'p-bridge-task-001',
+    runId: path.basename(run),
+    workerId: `worker-${path.basename(run)}`,
+    taskDigest: crypto.createHash('sha256').update('p-bridge-local-mocked-ready').digest('hex'),
+    sourceCheckpoint: {
+      repositoryId: 'forgivesam168/munder-difflin',
+      commitSha: 'a3a3e7b4819abadefd16bede77aad5cf51adf568',
+      treeSha: 'e4ad946d915f75dcb7b24f70a7b82719c7a8f981'
+    }
+  };
+  const localExecutable = {
+    executablePath: process.execPath,
+    version: process.version,
+    executableSha256: hash(process.execPath)
+  };
+  const localContract = createCodexWorkerContract({
+    ...localIdentity, executable: localExecutable, syntheticRoot: syntheticRootDir,
+    credentialMode: 'DEDICATED_PREPROVISIONED'
+  });
+  for (const directory of localContract.rootPolicy.allowedDirectories) fs.mkdirSync(directory);
+  const requestPath = path.join(host, 'request.json');
+  fs.writeFileSync(requestPath, JSON.stringify({ contract: localContract }), { flag: 'wx' });
+
+  const helperData = path.join(run, 'helper');
+  for (const name of ['home', 'temp', 'appdata', 'localappdata']) fs.mkdirSync(path.join(helperData, name), { recursive: true });
+  const helperEnv = {
+    SystemRoot: process.env.SystemRoot,
+    ComSpec: path.join(process.env.SystemRoot, 'System32', 'cmd.exe'),
+    PATH: path.join(process.env.SystemRoot, 'System32'),
+    HOME: path.join(helperData, 'home'),
+    USERPROFILE: path.join(helperData, 'home'),
+    TEMP: path.join(helperData, 'temp'),
+    TMP: path.join(helperData, 'temp'),
+    APPDATA: path.join(helperData, 'appdata'),
+    LOCALAPPDATA: path.join(helperData, 'localappdata')
+  };
+
+  // The accepted owned-runtime backend record, hash-bound to the real local files.
+  const localBackend = {
+    runtime: 'BOUNDED_OWNED_PTY',
+    helperPath,
+    helperSha256: hash(helperPath),
+    nativeScriptPath,
+    nativeScriptSha256: hash(nativeScriptPath),
+    nativeSourcePath,
+    nativeSourceSha256: hash(nativeSourcePath)
+  };
+  const permitExpiry = Date.now() + 120_000;
+  const localPermit = {
+    permitId: 'permit-p-bridge-001',
+    expiresAt: permitExpiry,
+    humanApproved: true,
+    identity: localIdentity,
+    fixture: { ...localExecutable, scriptPath: fixturePath, scriptSha256: hash(fixturePath) },
+    requestPath,
+    requestSha256: hash(requestPath),
+    mode: 'pass',
+    argv: [...CODEX_WORKER_ARGV],
+    syntheticRoot: syntheticRootDir,
+    hostReceiptDir: host,
+    workerPath: localContract.rootPolicy.workDir,
+    limits: { maxResultBytes: 65536, maxArtifactBytes: 65536, maxArtifactTotalBytes: 262144, maxArtifactCount: 8 },
+    ownedBackend: {
+      helperPath, helperSha256: localBackend.helperSha256,
+      scriptPath: localBackend.nativeScriptPath, scriptSha256: localBackend.nativeScriptSha256,
+      nativeSourcePath: localBackend.nativeSourcePath, nativeSourceSha256: localBackend.nativeSourceSha256,
+      helperEnv, cols: 100, rows: 30, timeoutMs: 12000, cleanupMs: 5000
+    }
+  };
+
+  // All-evidence input: credential, network, endpoint, ownership, and authority
+  // claims are all satisfied so the ten-gate table reaches READY. This is the
+  // MOCKED half — it proves the bridge mechanics, not provider authority.
+  const bridgeReadyInput = {
+    permit: {
+      permitId: localPermit.permitId, expiresAt: permitExpiry,
+      ownedRuntimeBackend: localBackend, humanApproved: true
+    },
+    identity: localIdentity,
+    executable: localExecutable,
+    executableIdentity: {
+      canonicalPath: localExecutable.executablePath,
+      regularFile: true,
+      resolution: 'absolute-direct',
+      version: localExecutable.version,
+      executableSha256: localExecutable.executableSha256
+    },
+    syntheticRoot: syntheticRootDir,
+    rootPolicy: {
+      root: localContract.rootPolicy.root,
+      projectDir: localContract.rootPolicy.projectDir,
+      workDir: localContract.rootPolicy.workDir,
+      artifactDir: localContract.rootPolicy.artifactDir,
+      resultPath: localContract.rootPolicy.resultPath,
+      canonical: true, directories: true, linkFree: true
+    },
+    environment: {
+      path: localContract.rootPolicy.workDir,
+      home: localContract.rootPolicy.homeDir,
+      userProfile: localContract.rootPolicy.userProfileDir,
+      temp: localContract.rootPolicy.tempDir,
+      tmp: localContract.rootPolicy.tempDir,
+      codexHome: localContract.rootPolicy.codexHomeDir,
+      systemRoot: process.env.SystemRoot
+    },
+    credentials: {
+      mode: 'DEDICATED_PREPROVISIONED',
+      dailyAuthJsonAccessed: false, dailyConfigTomlAccessed: false,
+      credentialLikeEnvironmentPresent: false, providerSecretsPresent: false,
+      dedicatedPreprovisioned: true, handoffAuthorized: true
+    },
+    network: { providerNetworkAuthority: 'AUTHORIZED', endpointEnforcement: 'APPROVED', impliedByFullAccess: false },
+    processOwnership: {
+      platform: 'win32', ptyAtCreation: 'VERIFIED', windowsJobAtCreation: 'VERIFIED',
+      descendants: 'VERIFIED', stop: 'VERIFIED', timeout: 'VERIFIED', cleanup: 'VERIFIED'
+    },
+    resultConsumer: {
+      resultPath: localContract.resultPolicy.resultPath,
+      artifactDir: localContract.resultPolicy.artifactDir,
+      resultSlotAvailable: true, validatorBound: true, artifactContainmentBound: true,
+      duplicateRejected: true, consumerReady: true
+    },
+    authority: {
+      sourceCheckpointApproved: true, identityApproved: true, humanApproved: true, runtimePermit: 'PRESENT'
+    }
+  };
+
+  const bridge = preflightApi.createProviderWorkerBridge();
+  // In addition to the shared process/filesystem-write witness, trip any socket
+  // connect: a provider/model endpoint contact must fail this case, not pass it.
+  const originalConnect = net.Socket.prototype.connect;
+  const connects = [];
+  net.Socket.prototype.connect = function connect() {
+    connects.push('connect');
+    throw new Error('network connect attempted during bridge preparation');
+  };
+  let witnessed;
+  try {
+    witnessed = withInvocationWitness(() => {
+      const preflight = prepareProviderBackedWorker(bridgeReadyInput);
+      const ticket = bridge.authorize(preflight, localPermit, 'AUTHORIZED');
+      return { preflight, ticket, prepared: bridge.prepare(preflight, ticket) };
+    });
+  } finally {
+    net.Socket.prototype.connect = originalConnect;
+  }
+  assert.deepEqual(connects, [], 'no provider/model endpoint may be contacted');
+  assert.deepEqual(witnessed.attempts, [], 'the bridge must reach preparation with no process or filesystem-write effect');
+
+  const { preflight, ticket, prepared } = witnessed.value;
+  // The mocked half: READY admission is bridge mechanics only, and invocation
+  // permission stays the literal `false` even on this all-evidence record.
+  assert.equal(preflight.admission.state, 'READY');
+  assert.equal(preflight.providerAdmissionReady, true);
+  assert.equal(preflight.providerInvocationAllowed, false);
+  assert.equal(preflight.launchAuthority, 'NOT_GRANTED');
+  assert.equal(preflight.launchable, false);
+
+  // A real minted PreparedBoundedWorker with the frozen identity and binding.
+  assert.equal(Object.isFrozen(prepared), true);
+  assert.equal(prepared.permitId, localPermit.permitId);
+  assert.equal(prepared.contract.candidateId, localIdentity.candidateId);
+  assert.equal(prepared.contract.taskId, localIdentity.taskId);
+  assert.equal(prepared.contract.runId, localIdentity.runId);
+  assert.equal(prepared.contract.workerId, localIdentity.workerId);
+  assert.equal(prepared.contract.taskDigest, localIdentity.taskDigest);
+  assert.deepEqual(prepared.contract.sourceCheckpoint, localContract.sourceCheckpoint);
+  assert.equal(prepared.contract.rootPolicy.root, syntheticRootDir);
+  assert.equal(prepared.executablePath, localExecutable.executablePath);
+  assert.equal(prepared.contract.executable.version, localExecutable.version);
+  assert.equal(prepared.contract.executable.executableSha256, localExecutable.executableSha256);
+
+  // Fixed launch, explicit environment, and the bound owned-runtime backend.
+  assert.deepEqual(prepared.args, [...CODEX_WORKER_ARGV]);
+  assert.equal(prepared.cwd, localContract.rootPolicy.workDir);
+  assert.deepEqual(Object.keys(prepared.env), [...CODEX_ENV_ALLOWLIST]);
+  assert.equal(prepared.env.HOME, localContract.rootPolicy.homeDir);
+  assert.equal(prepared.env.SYSTEMROOT, process.env.SystemRoot);
+  assert.ok(!('OPENAI_API_KEY' in prepared.env));
+  assert.ok(!('CODEX_API_KEY' in prepared.env));
+  assert.equal(prepared.launch.helperPath, localBackend.helperPath);
+  assert.equal(prepared.launch.helperSha256, localBackend.helperSha256);
+  assert.equal(prepared.launch.scriptPath, localBackend.nativeScriptPath);
+  assert.equal(prepared.launch.scriptSha256, localBackend.nativeScriptSha256);
+  assert.equal(prepared.launch.nativeSourcePath, localBackend.nativeSourcePath);
+  assert.equal(prepared.launch.nativeSourceSha256, localBackend.nativeSourceSha256);
+  assert.equal(prepared.launch.executablePath, localExecutable.executablePath);
+  assert.equal(prepared.launch.executableSha256, localExecutable.executableSha256);
+  // Runtime backend: the preflight's accepted record is carried into the launch
+  // binding verbatim, with the fixed native bounds — not re-derived from caller data.
+  assert.deepEqual(preflight.runtimeBackend, localBackend);
+  assert.equal(prepared.launch.cols, 100);
+  assert.equal(prepared.launch.rows, 30);
+  assert.equal(prepared.launch.timeoutMs, 12000);
+  assert.equal(prepared.launch.cleanupMs, 5000);
+  assert.match(prepared.bindingDigest, /^[0-9a-f]{64}$/);
+
+  // The minted admission IS the preflight's decision, still READY, and the
+  // prepared object carries no launch right of its own.
+  assert.equal(prepared.admission, preflight.admission);
+  assert.equal(prepared.admission.state, 'READY');
+  assert.equal(prepared.admission.runtimeReady, true);
+  assert.equal(preflight.providerInvocationAllowed, false, 'preparation must not upgrade invocation permission');
+  assert.equal(typeof prepared.accept, 'function');
+
+  // Bounded mint authenticity: the object is a member of the preparation registry,
+  // while a spread copy and a JSON re-parse of it are not.
+  assert.doesNotThrow(() => bounded.assertPreparedBoundedWorker(prepared));
+  assert.throws(() => bounded.assertPreparedBoundedWorker({ ...prepared }), /was not minted by prepareBoundedWorker/);
+  assert.throws(() => bounded.assertPreparedBoundedWorker(JSON.parse(JSON.stringify(prepared))), /was not minted by prepareBoundedWorker/);
+  assert.throws(() => bounded.consumePreparedBoundedWorker({ ...prepared }), /was not minted by prepareBoundedWorker/);
+
+  // The spent ticket and the spent preflight cannot prepare again, and a foreign
+  // bridge, a structural preflight, or a forged ticket all fail closed — each
+  // refusal under its own witness, so "refused without effects" is observed and
+  // not merely asserted.
+  const refusals = withInvocationWitness(() => {
+    assert.throws(() => bridge.prepare(preflight, ticket), /authority is absent or does not match preflight/);
+    assert.throws(() => bridge.prepare(preflight, { ...ticket }), /authority is absent or does not match preflight/);
+    assert.throws(() => bridge.authorize(preflight, localPermit, 'AUTHORIZED'), /already consumed/);
+    assert.throws(() => bridge.prepare({ ...preflight }, ticket), /was not minted by prepareProviderBackedWorker/);
+    assert.throws(() => preflightApi.createProviderWorkerBridge().prepare(preflight, ticket), /does not match preflight/);
+  });
+  assert.deepEqual(refusals.attempts, []);
+
+  // Neither half of this case reaches the PTY layer: no `PtyManager`,
+  // `launchOwnedPty`, `consumePreparedBoundedWorker`, provider CLI, or provider
+  // request was made, and the prepared worker was never consumed or launched.
+  assert.deepEqual(witnessed.attempts, []);
+  assert.deepEqual(connects, []);
 });

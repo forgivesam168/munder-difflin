@@ -27,6 +27,7 @@ import {
 } from './codexWorkerContract';
 import { buildCodexWorkerEnv, validateCodexWorkerEnv, type CodexWorkerEnvironmentInput } from './ptyEnv';
 import type { OwnedPtyLaunch, OwnedPtyReceipt } from './windowsOwnedPty';
+import { consumeProviderWorkerBridge } from './providerWorker';
 
 /** Host acceptance receipt schema, written once per accepted identity. */
 export const BOUNDED_WORKER_ACCEPTANCE_VERSION = 1 as const;
@@ -239,7 +240,7 @@ export interface PreparedBoundedWorker {
   readonly launch: OwnedPtyLaunch;
   /** Binds identity + request digest + argv + executable/script/helper/native digests + root + env + bounds. */
   readonly bindingDigest: string;
-  readonly admission: ProviderFreeAdmission;
+  readonly admission: ProviderFreeAdmission | AdmissionDecision;
   /**
    * Durable result consumer, once-only, synchronous. Lifecycle is strict:
    * `prepared → launched` (`consumePreparedBoundedWorker`, before spawning) →
@@ -627,7 +628,10 @@ function providerFreeAdmission(input: {
  * one-shot launch binding plus durable result consumer. Throws on any refusal:
  * a refused preparation produces no object and performs no write.
  */
-export function prepareBoundedWorker(permit: BoundedWorkerPermit): PreparedBoundedWorker {
+export function prepareBoundedWorker(permit: BoundedWorkerPermit, providerBridge?: unknown): PreparedBoundedWorker {
+  // Authenticate before even reading permit paths. Generic structural callers cannot opt in.
+  const bridge = providerBridge === undefined ? null : consumeProviderWorkerBridge(providerBridge);
+  const provider = bridge?.preflight;
   if (typeof permit !== 'object' || permit === null) throw new Error('Invalid bounded worker permit');
   const permitId = assertText(permit.permitId, 'bounded worker permitId', PERMIT_ID_RE);
   if (typeof permit.expiresAt !== 'number' || !Number.isSafeInteger(permit.expiresAt)) {
@@ -655,7 +659,7 @@ export function prepareBoundedWorker(permit: BoundedWorkerPermit): PreparedBound
     throw new Error('Bounded worker fixture files must live outside the worker-writable synthetic root');
   }
   const requestPath = assertApprovedLocalPath(permit.requestPath, 'Bounded worker request document');
-  const args = readApprovedArgv(permit.argv, scriptPath, requestPath, mode);
+  const args = provider ? provider.launch.args : readApprovedArgv(permit.argv, scriptPath, requestPath, mode);
   assertApprovedFileDigest(executablePath, 'Bounded worker fixture executable', executableSha256, MAX_APPROVED_FILE_BYTES);
   assertApprovedFileDigest(scriptPath, 'Bounded worker fixture script', scriptSha256, MAX_APPROVED_FILE_BYTES);
   const requestDocument = assertApprovedRequestFile(requestPath, requestSha256, syntheticRoot);
@@ -669,7 +673,7 @@ export function prepareBoundedWorker(permit: BoundedWorkerPermit): PreparedBound
 
   const contract = createCodexWorkerContract({
     ...permit.identity, executable: { executablePath, version, executableSha256 },
-    syntheticRoot, credentialMode: 'NONE'
+    syntheticRoot, credentialMode: provider ? 'DEDICATED_PREPROVISIONED' : 'NONE'
   });
   try {
     assertRequestContractBinding(JSON.parse(requestDocument.toString('utf8')) as unknown, contract);
@@ -692,6 +696,19 @@ export function prepareBoundedWorker(permit: BoundedWorkerPermit): PreparedBound
   };
   // Built from explicit inputs only — no host environment is read or merged.
   const env = validateCodexWorkerEnv(buildCodexWorkerEnv(envInput), envInput);
+  if (provider) {
+    const expectedBackend = provider.runtimeBackend;
+    if (permit.permitId !== provider.permitId || permit.expiresAt !== bridge!.expiresAt
+      || JSON.stringify(contract) !== JSON.stringify(provider.contract)
+      || JSON.stringify(env) !== JSON.stringify(provider.env)
+      || JSON.stringify(permit.argv) !== JSON.stringify(provider.launch.args)
+      || !expectedBackend || expectedBackend.runtime !== 'BOUNDED_OWNED_PTY'
+      || backend.helperPath !== expectedBackend.helperPath || backend.helperSha256 !== expectedBackend.helperSha256
+      || backend.scriptPath !== expectedBackend.nativeScriptPath || backend.scriptSha256 !== expectedBackend.nativeScriptSha256
+      || backend.nativeSourcePath !== expectedBackend.nativeSourcePath || backend.nativeSourceSha256 !== expectedBackend.nativeSourceSha256) {
+      throw new Error('Provider bridge does not match bounded identity, environment, argv, backend or authority');
+    }
+  }
   const launch: OwnedPtyLaunch = Object.freeze({
     ...backend, executablePath, executableSha256: contract.executable.executableSha256,
     args, cwd: rootPolicy.workDir, env
@@ -704,16 +721,17 @@ export function prepareBoundedWorker(permit: BoundedWorkerPermit): PreparedBound
     executablePath, executableSha256: contract.executable.executableSha256, executableVersion: version,
     scriptPath, scriptSha256, mode, argv: args,
     cwd: rootPolicy.workDir, env, syntheticRoot, resultPath: rootPolicy.resultPath, artifactDir: rootPolicy.artifactDir,
-    hostReceiptDir, limits, backend
+    hostReceiptDir, limits, backend,
+    ...(provider ? { providerAdmission: provider.admission, launchAuthority: 'AUTHORIZED', expiresAt: bridge!.expiresAt } : {})
   };
   const bindingDigest = createHash('sha256').update(JSON.stringify(binding), 'utf8').digest('hex');
   const receiptPath = join(hostReceiptDir, `bounded-worker-${bindingDigest}.json`);
   if (existsSync(receiptPath)) throw new Error('Bounded worker acceptance already exists for this binding');
 
-  const admission = providerFreeAdmission({
+  const admission = provider ? provider.admission : providerFreeAdmission({
     contract, env, resultPath: rootPolicy.resultPath, artifactDir: rootPolicy.artifactDir
   });
-  if (admission.state !== 'READY') throw new Error('Bounded worker provider-free admission is not ready');
+  if (admission.state !== 'READY') throw new Error('Bounded worker admission is not ready');
 
   const state: PreparedState = {
     expiresAt: permit.expiresAt, bindingDigest, permitId, contract, limits,

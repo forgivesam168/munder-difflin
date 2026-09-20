@@ -1,52 +1,8 @@
-/**
- * P preflight: the Main-only provider-backed preparation seam.
- *
- * It binds the accepted contract (`createCodexWorkerContract`), the fixed Codex
- * invocation (`buildCodexWorkerLaunch`), and the explicit bounded environment
- * (`buildCodexWorkerEnv`) into ONE immutable admission result, so credential
- * handoff, provider-network authority, and endpoint enforcement are explicit,
- * enforceable FINAL gates rather than implicit properties of "the provider
- * path".
- *
- * Security boundary, by construction:
- *  - nothing here reads `process.env`, the operator's home, daily Codex
- *    auth/config, the secret broker, PATH resolution, or the provider CLI;
- *  - this module imports no filesystem, process, Electron, credential, or
- *    network API, so no mechanism exists to reach them;
- *  - every fact arrives as explicit Main-held evidence, and evidence that
- *    contradicts the approved descriptor or root policy is refused outright;
- *  - it never launches and never contacts a provider. A READY decision here is
- *    `providerAdmissionReady: true` with `providerInvocationAllowed: false` (the
- *    literal) and `launchAuthority: 'NOT_GRANTED'`: admission readiness is NOT
- *    invocation permission. This seam mints NO `PreparedBoundedWorker`
- *    and never reaches `PtyManager.spawnBounded` or `launchOwnedPty`, so the
- *    accepted owned-runtime mint/consume invariants are neither weakened nor
- *    bypassed;
- *  - its `ProviderWorkerPreflight` result is MINTED, not structural: membership
- *    in the module-private registry is the object's identity, so a renderer IPC
- *    object, a JSON parse, or a spread copy can never authenticate. The renderer
- *    IPC guards (`pty:spawn`, `worker:spawnRequest`) reject the field outright;
- *  - it is main-only: it is registered on no IPC channel and is not imported by
- *    the preload or renderer bundles.
- *
- * Production ingestion seam: `spawnAgentCore` (src/main/index.ts) authenticates a
- * Main-minted preflight BEFORE its bounded branch and before any generic spawn
- * effect, and returns `decideProviderWorkerLaunch(...).reason` as a fail-closed
- * `{ ok: false }`. That is the whole integration in this slice: the preflight is
- * reached, authenticated, and refused — never launched.
- *
- * Defense in depth: `PtyManager.spawn` (src/main/pty.ts) additionally REFUSES any
- * `providerWorkerPreflight` field before cwd expansion, command/shim resolution,
- * and every generic effect, so a future caller bypassing `spawnAgentCore` still
- * cannot reach a generic path. The PTY layer never authenticates — production
- * authentication remains `spawnAgentCore`.
- *
- * MISSING FUTURE AUTHORITY (deliberately NOT implemented here): a Human launch
- * authorization for provider-backed work, and a launch bridge that mints a
- * `PreparedBoundedWorker` from this preflight's `contract` / `launch` / `env` /
- * `runtimeBackend` so the accepted `PtyManager.spawnBounded` consume path can run.
- * Until that authorization and bridge exist, `decideProviderWorkerLaunch` can
- * never return a launchable result — a READY admission is still only a decision.
+/** Main-only provider preflight and identity-bound bridge to the existing bounded
+ * mint/consume lifecycle. Admission evidence never grants invocation authority.
+ * Main keeps its bridge issuer private; production supplies no launch ticket.
+ * No credential or network authority is inferred or upgraded. Native ownership
+ * and durable acceptance remain per-run obligations of the bounded consumer.
  */
 
 import {
@@ -73,6 +29,7 @@ import {
 } from './codexWorkerContract';
 import { buildCodexWorkerEnv, validateCodexWorkerEnv, type CodexWorkerEnvironmentInput } from './ptyEnv';
 import { buildCodexWorkerLaunch, type CodexWorkerLaunch } from './workerLaunch';
+import { prepareBoundedWorker, type BoundedWorkerPermit, type PreparedBoundedWorker } from './boundedWorker';
 
 export const PROVIDER_PREFLIGHT_SCHEMA_VERSION = 1 as const;
 
@@ -189,6 +146,7 @@ interface MintedPreflightState {
   readonly permitId: string | null;
   readonly admissionState: AdmissionState;
   readonly blockedGates: readonly AdmissionGateName[];
+  readonly expiresAt: number;
 }
 
 const MINTED_PREFLIGHTS = new WeakMap<object, MintedPreflightState>();
@@ -243,8 +201,7 @@ export interface ProviderWorkerLaunchDecision {
  * effects: no filesystem access, no process launch, no provider contact, and no
  * `PreparedBoundedWorker` minting. A forged/structural object is refused (throws);
  * a genuine BLOCKED or READY preflight both return `launchable: false` with an
- * explicit reason, because the launch bridge and its Human authorization do not
- * exist in this slice.
+ * explicit reason. Only a separate Main-held bridge ticket can grant launch.
  */
 export function decideProviderWorkerLaunch(value: unknown): ProviderWorkerLaunchDecision {
   assertProviderWorkerPreflight(value);
@@ -265,6 +222,51 @@ export function decideProviderWorkerLaunch(value: unknown): ProviderWorkerLaunch
     blockedGates: Object.freeze([] as AdmissionGateName[]),
     reason: 'provider-backed worker admission is READY but launch authority is NOT_GRANTED in this slice; provider invocation is NOT authorized and providerInvocationAllowed is false; the launch bridge to the bounded owned runtime is not authorized; no provider process is started'
   });
+}
+
+const SPENT_PREFLIGHTS = new WeakSet<object>();
+
+/** Main owns this closure; neither the issuer nor its tickets belong in spawn data. */
+export function createProviderWorkerBridge() {
+  const tickets = new WeakMap<object, { preflight: ProviderWorkerPreflight; permit: BoundedWorkerPermit }>();
+  return Object.freeze({
+    authorize(preflight: ProviderWorkerPreflight, permit: BoundedWorkerPermit, invocationAuthority: 'AUTHORIZED'): object {
+      assertProviderWorkerPreflight(preflight);
+      if (invocationAuthority !== 'AUTHORIZED') throw new Error('Provider invocation authority is absent');
+      if (!preflight.providerAdmissionReady) throw new Error(decideProviderWorkerLaunch(preflight).reason);
+      if (SPENT_PREFLIGHTS.has(preflight)) throw new Error('Provider preflight bridge right was already consumed');
+      const ticket = Object.freeze({});
+      // Snapshot only explicit Main-held permit data; no request data can issue a ticket.
+      const snapshot = JSON.parse(JSON.stringify(permit)) as BoundedWorkerPermit;
+      tickets.set(ticket, { preflight, permit: snapshot });
+      return ticket;
+    },
+    prepare(value: unknown, ticket: unknown): PreparedBoundedWorker {
+      assertProviderWorkerPreflight(value);
+      if (!value.providerAdmissionReady) throw new Error(decideProviderWorkerLaunch(value).reason);
+      const entry = typeof ticket === 'object' && ticket !== null ? tickets.get(ticket) : undefined;
+      if (!entry || entry.preflight !== value) throw new Error('Provider bridge authority is absent or does not match preflight');
+      if (SPENT_PREFLIGHTS.has(value)) throw new Error('Provider preflight bridge right was already consumed');
+      const state = MINTED_PREFLIGHTS.get(value)!;
+      if (Date.now() > state.expiresAt) throw new Error('Provider preflight permit expired before bridge');
+      tickets.delete(ticket as object);
+      SPENT_PREFLIGHTS.add(value);
+      const binding = Object.freeze({ preflight: value, expiresAt: state.expiresAt });
+      BRIDGE_BINDINGS.set(binding, binding);
+      return prepareBoundedWorker(entry.permit, binding);
+    }
+  });
+}
+
+const BRIDGE_BINDINGS = new WeakMap<object, { readonly preflight: ProviderWorkerPreflight; readonly expiresAt: number }>();
+
+/** Internal bounded preparation ingestion: structural objects never cross this seam. */
+export function consumeProviderWorkerBridge(value: unknown) {
+  const binding = typeof value === 'object' && value !== null ? BRIDGE_BINDINGS.get(value) : undefined;
+  if (!binding) throw new Error('Provider bridge binding was not minted or was already consumed');
+  BRIDGE_BINDINGS.delete(value as object);
+  if (Date.now() > binding.expiresAt) throw new Error('Provider bridge binding expired');
+  return binding;
 }
 
 function refuse(message: string): never {
@@ -560,6 +562,7 @@ export function prepareProviderBackedWorker(input: ProviderWorkerPreparationInpu
     launchable: false as const
   });
   MINTED_PREFLIGHTS.set(result, Object.freeze({
+    expiresAt: permit === null ? 0 : permit.expiresAt,
     permitId: result.permitId,
     admissionState: admission.state,
     blockedGates
