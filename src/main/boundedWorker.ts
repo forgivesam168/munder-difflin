@@ -16,7 +16,7 @@
 
 import { closeSync, existsSync, fsyncSync, fstatSync, linkSync, lstatSync, openSync, readSync, readdirSync, realpathSync, statSync, unlinkSync, writeFileSync } from 'node:fs';
 import { createHash, randomBytes } from 'node:crypto';
-import { delimiter, join, parse, sep } from 'node:path';
+import { delimiter, dirname, join, parse, sep } from 'node:path';
 import {
   createCodexWorkerContract, classifyTerminal, evaluateCodexAdmission, isCanonicalAbsolutePath,
   isCredentialLikeEnvironmentKey, isPathWithin, validateTaskResult,
@@ -28,6 +28,7 @@ import {
 import { buildCodexWorkerEnv, validateCodexWorkerEnv, type CodexWorkerEnvironmentInput } from './ptyEnv';
 import type { OwnedPtyLaunch, OwnedPtyReceipt } from './windowsOwnedPty';
 import { consumeProviderWorkerBridge } from './providerWorker';
+import { assertNoProviderSecretContent, consumeProviderExecutionPreparation, readProviderTaskDocument } from './providerExecutionPreparation';
 
 /** Host acceptance receipt schema, written once per accepted identity. */
 export const BOUNDED_WORKER_ACCEPTANCE_VERSION = 1 as const;
@@ -266,6 +267,9 @@ interface PreparedState {
   readonly permitId: string;
   readonly contract: CodexWorkerContract;
   readonly limits: BoundedWorkerLimits;
+  readonly providerExecution?: unknown;
+  readonly env: Readonly<Record<string, string>>;
+  published: boolean;
   readonly facts: PreparedFacts;
   readonly requestPath: string;
   readonly syntheticRoot: string;
@@ -677,6 +681,7 @@ export function prepareBoundedWorker(permit: BoundedWorkerPermit, providerBridge
   });
   try {
     assertRequestContractBinding(JSON.parse(requestDocument.toString('utf8')) as unknown, contract);
+    if (provider) readProviderTaskDocument(requestDocument, contract);
   } catch (error) {
     if (error instanceof SyntaxError) throw new Error('Bounded worker request document must be JSON');
     throw error;
@@ -735,6 +740,7 @@ export function prepareBoundedWorker(permit: BoundedWorkerPermit, providerBridge
 
   const state: PreparedState = {
     expiresAt: permit.expiresAt, bindingDigest, permitId, contract, limits,
+    providerExecution: bridge?.execution, env, published: false,
     requestPath, syntheticRoot, resultPath: rootPolicy.resultPath, artifactDir: rootPolicy.artifactDir,
     receiptPath,
     digests: Object.freeze([
@@ -796,6 +802,9 @@ function assertLaunchPreconditions(state: PreparedState): void {
   assertFreshSyntheticRoot(state.syntheticRoot);
   if (existsSync(state.resultPath)) throw new Error('Bounded worker durable result slot must be empty before launch');
   if (existsSync(state.receiptPath)) throw new Error('Bounded worker acceptance already exists for this binding');
+  if (state.providerExecution !== undefined) {
+    consumeProviderExecutionPreparation(state.providerExecution, state.contract, requestBytes, state.env);
+  }
 }
 
 /** Transition `prepared → launched`; required before native launch and acceptance. */
@@ -807,6 +816,27 @@ export function consumePreparedBoundedWorker(value: unknown): PreparedBoundedWor
   assertLaunchPreconditions(state);
   state.launched = true;
   return value;
+}
+
+/** Trusted Main adapter only: terminal text and exit callbacks never call this publisher.
+ * Existing acceptance remains the sole artifact-verification and receipt authority. */
+export function publishBoundedWorkerTaskResult(prepared: unknown, value: unknown): void {
+  assertPreparedBoundedWorker(prepared);
+  const state = MINTED.get(prepared)!;
+  if (!state.launched || state.accepted || state.published) throw new Error('Result publication is not live or was already consumed');
+  // Lifecycle/duplicate rejection is a pure state observation and runs before any parsing or
+  // content scanning, so a second publication reports the duplicate rather than a content refusal.
+  if (existsSync(state.resultPath)) throw new Error('Duplicate task result');
+  assertNoProviderSecretContent(value);
+  const result = validateTaskResult(value, state.contract, { resultAlreadyExists: false });
+  const bytes = Buffer.from(`${JSON.stringify(result, null, 2)}\n`, 'utf8');
+  if (bytes.length > state.limits.maxResultBytes) throw new Error('Durable result exceeds its byte limit');
+  if (state.resultPath !== state.contract.resultPolicy.resultPath
+    || !isPathWithin(state.resultPath, state.syntheticRoot)) throw new Error('Durable result path binding mismatch');
+  assertApprovedLocalPath(dirname(state.resultPath), 'Durable result parent');
+  // Existing acceptance, not this publisher, verifies declared artifact bytes.
+  publishAtomicExclusiveBytes(state.resultPath, bytes);
+  state.published = true;
 }
 
 interface NativeObservation {
@@ -886,13 +916,17 @@ function verifyArtifacts(result: CodexTaskResult, artifactDir: string, limits: B
   return Object.freeze(verified);
 }
 
-/** `writeFileSync(wx)` + `linkSync` is atomic-exclusive: no exists-then-rename window can overwrite. */
+/** Acceptance receipts and task results are distinct documents sharing only atomic I/O. */
 function publishAcceptanceReceipt(path: string, body: unknown): { readonly sha256: string } {
-  const bytes = Buffer.from(`${JSON.stringify(body, null, 2)}\n`, 'utf8');
+  return publishAtomicExclusiveBytes(path, Buffer.from(`${JSON.stringify(body, null, 2)}\n`, 'utf8'));
+}
+
+/** Atomic-exclusive file publication; result callers supply validated canonical bytes. */
+function publishAtomicExclusiveBytes(path: string, bytes: Buffer): { readonly sha256: string } {
   const temporary = `${path}.${process.pid.toString(36)}.${randomBytes(8).toString('hex')}.tmp`;
   const fd = openSync(temporary, 'wx');
-  try { writeFileSync(fd, bytes); fsyncSync(fd); } finally { closeSync(fd); }
   try {
+    try { writeFileSync(fd, bytes); fsyncSync(fd); } finally { closeSync(fd); }
     linkSync(temporary, path);
   } finally {
     try { unlinkSync(temporary); } catch { /* the uniquely named temp is inert if the unlink fails */ }

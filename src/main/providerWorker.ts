@@ -29,7 +29,8 @@ import {
 } from './codexWorkerContract';
 import { buildCodexWorkerEnv, validateCodexWorkerEnv, type CodexWorkerEnvironmentInput } from './ptyEnv';
 import { buildCodexWorkerLaunch, type CodexWorkerLaunch } from './workerLaunch';
-import { prepareBoundedWorker, type BoundedWorkerPermit, type PreparedBoundedWorker } from './boundedWorker';
+import { assertPreparedBoundedWorker, prepareBoundedWorker, publishBoundedWorkerTaskResult, type BoundedWorkerPermit, type PreparedBoundedWorker } from './boundedWorker';
+import { assertProviderExecutionPreparation } from './providerExecutionPreparation';
 
 export const PROVIDER_PREFLIGHT_SCHEMA_VERSION = 1 as const;
 
@@ -228,17 +229,18 @@ const SPENT_PREFLIGHTS = new WeakSet<object>();
 
 /** Main owns this closure; neither the issuer nor its tickets belong in spawn data. */
 export function createProviderWorkerBridge() {
-  const tickets = new WeakMap<object, { preflight: ProviderWorkerPreflight; permit: BoundedWorkerPermit }>();
+  const tickets = new WeakMap<object, { preflight: ProviderWorkerPreflight; permit: BoundedWorkerPermit; execution: unknown }>();
   return Object.freeze({
-    authorize(preflight: ProviderWorkerPreflight, permit: BoundedWorkerPermit, invocationAuthority: 'AUTHORIZED'): object {
+    authorize(preflight: ProviderWorkerPreflight, permit: BoundedWorkerPermit, invocationAuthority: 'AUTHORIZED', execution?: unknown): object {
       assertProviderWorkerPreflight(preflight);
       if (invocationAuthority !== 'AUTHORIZED') throw new Error('Provider invocation authority is absent');
       if (!preflight.providerAdmissionReady) throw new Error(decideProviderWorkerLaunch(preflight).reason);
+      assertProviderExecutionPreparation(execution, preflight.contract);
       if (SPENT_PREFLIGHTS.has(preflight)) throw new Error('Provider preflight bridge right was already consumed');
       const ticket = Object.freeze({});
       // Snapshot only explicit Main-held permit data; no request data can issue a ticket.
       const snapshot = JSON.parse(JSON.stringify(permit)) as BoundedWorkerPermit;
-      tickets.set(ticket, { preflight, permit: snapshot });
+      tickets.set(ticket, { preflight, permit: snapshot, execution });
       return ticket;
     },
     prepare(value: unknown, ticket: unknown): PreparedBoundedWorker {
@@ -251,14 +253,25 @@ export function createProviderWorkerBridge() {
       if (Date.now() > state.expiresAt) throw new Error('Provider preflight permit expired before bridge');
       tickets.delete(ticket as object);
       SPENT_PREFLIGHTS.add(value);
-      const binding = Object.freeze({ preflight: value, expiresAt: state.expiresAt });
+      assertProviderExecutionPreparation(entry.execution, value.contract);
+      const binding = Object.freeze({ preflight: value, expiresAt: state.expiresAt, execution: entry.execution });
       BRIDGE_BINDINGS.set(binding, binding);
       return prepareBoundedWorker(entry.permit, binding);
     }
   });
 }
 
-const BRIDGE_BINDINGS = new WeakMap<object, { readonly preflight: ProviderWorkerPreflight; readonly expiresAt: number }>();
+/** Trusted Main structured-result adapter, never an output/exit callback. Creation grants
+ * no launch or acceptance authority; publication still requires consumed preparation.
+ * Local provider-free preparations exercise this same seam without provider execution. */
+export function createProviderTaskResultAdapter(prepared: PreparedBoundedWorker) {
+  assertPreparedBoundedWorker(prepared);
+  return Object.freeze({
+    publish(result: unknown): void { publishBoundedWorkerTaskResult(prepared, result); }
+  });
+}
+
+const BRIDGE_BINDINGS = new WeakMap<object, { readonly preflight: ProviderWorkerPreflight; readonly expiresAt: number; readonly execution: unknown }>();
 
 /** Internal bounded preparation ingestion: structural objects never cross this seam. */
 export function consumeProviderWorkerBridge(value: unknown) {

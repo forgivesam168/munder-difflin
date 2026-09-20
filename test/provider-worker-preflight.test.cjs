@@ -19,6 +19,17 @@ const loadTs = require('./load-ts.cjs');
 
 const preflightApi = loadTs('src/main/providerWorker.ts');
 const contractApi = loadTs('src/main/codexWorkerContract.ts');
+const executionApi = loadTs('src/main/providerExecutionPreparation.ts');
+// Inert handles and .invalid metadata prove mechanics only, never provider/network authority.
+function executionFor(contract, text = 'provider-mechanics-only') {
+  const issuer = executionApi.createProviderExecutionIssuer();
+  const expiresAt = Date.now() + 120_000;
+  const request = Buffer.from(JSON.stringify({ contract, task: { encoding: 'utf8', text } }));
+  return issuer.prepare(contract, issuer.mintCredential(contract, {
+    recordId: 'synthetic-human-record', grantedBy: 'HUMAN', purpose: 'PROVIDER_EXECUTION',
+    scopeDigest: executionApi.providerCredentialScopeDigest(contract), endpointOrigin: 'https://provider.invalid', expiresAt
+  }), issuer.mintTask(contract, request, expiresAt), 'https://provider.invalid');
+}
 const launchApi = loadTs('src/main/workerLaunch.ts');
 // The PTY layer is loaded ONLY to prove its defense-in-depth refusal. Nothing in
 // the happy path of this suite may reach it; the refusal test is the exception.
@@ -36,7 +47,7 @@ const { CODEX_WORKER_ARGV } = launchApi;
 
 const SHA = {
   executable: 'a'.repeat(64),
-  task: 'b'.repeat(64)
+  task: require('node:crypto').createHash('sha256').update('provider-mechanics-only').digest('hex')
 };
 
 const identity = {
@@ -457,7 +468,8 @@ test('bridge refuses absent authority and structural preflights without effects'
       assert.throws(() => bridge.prepare(fake, {}), /not minted/);
     }
     assert.throws(() => bridge.prepare(ready, undefined), /authority is absent/);
-    const ticket = bridge.authorize(ready, {}, 'AUTHORIZED');
+    assert.throws(() => bridge.authorize(ready, {}, 'AUTHORIZED'), /Missing or forged/);
+    const ticket = bridge.authorize(ready, {}, 'AUTHORIZED', executionFor(ready.contract));
     for (const fake of [{}, { ...ticket }, JSON.parse(JSON.stringify(ticket))]) {
       assert.throws(() => bridge.prepare(ready, fake), /authority is absent/);
     }
@@ -473,21 +485,22 @@ test('bridge refuses absent authority and structural preflights without effects'
 test('expired preflight cannot bridge and a failed preparation spends every ticket for that preflight', () => {
   const bridge = preflightApi.createProviderWorkerBridge();
   const ready = prepareProviderBackedWorker(allEvidenceInput());
-  const ticket = bridge.authorize(ready, {}, 'AUTHORIZED');
+  const execution = executionFor(ready.contract);
+  const ticket = bridge.authorize(ready, {}, 'AUTHORIZED', execution);
   const originalNow = Date.now;
   try {
     Date.now = () => permit.expiresAt + 1;
     assert.throws(() => bridge.prepare(ready, ticket), /expired/);
   } finally { Date.now = originalNow; }
-  const second = bridge.authorize(ready, {}, 'AUTHORIZED');
+  const second = bridge.authorize(ready, {}, 'AUTHORIZED', execution);
   const otherBridge = preflightApi.createProviderWorkerBridge();
-  const other = otherBridge.authorize(ready, {}, 'AUTHORIZED');
+  const other = otherBridge.authorize(ready, {}, 'AUTHORIZED', execution);
   const witnessed = withInvocationWitness(() => {
     assert.throws(() => bridge.prepare(ready, ticket), /permitId/);
     assert.throws(() => bridge.prepare(ready, ticket), /authority is absent/);
     assert.throws(() => bridge.prepare(ready, second), /already consumed/);
     assert.throws(() => otherBridge.prepare(ready, other), /already consumed/);
-    assert.throws(() => bridge.authorize(ready, {}, 'AUTHORIZED'), /already consumed/);
+    assert.throws(() => bridge.authorize(ready, {}, 'AUTHORIZED', execution), /already consumed/);
   });
   assert.deepEqual(witnessed.attempts, []);
 });
@@ -751,11 +764,10 @@ test('the PTY refusal is ordered before the bounded dispatch and the generic pat
 });
 
 /**
- * The one POSITIVE path in this suite. Every case above is fail-closed; this case
- * walks the PRODUCTION `createProviderWorkerBridge().authorize` → `prepare` seam
- * across real repository-local fixture/native helper files far enough to receive a
- * genuinely minted `PreparedBoundedWorker`, and stops at that boundary: it does
- * not consume, launch, spawn, or contact anything.
+ * The positive path walks the PRODUCTION bridge across local fixture/backend files
+ * to a minted preparation, then exercises final consumption refusal twice under
+ * process/write/network witnesses. A separate provider-free preparation exercises
+ * trusted structured result publication without launching any process.
  *
  * MOCKED/DERIVED READY IS BRIDGE MECHANICS ONLY. The READY admission constructed
  * here is a locally derived, Main-shaped evidence record over local files; it is
@@ -815,7 +827,8 @@ test('the production bridge reaches a minted PreparedBoundedWorker with zero inv
   });
   for (const directory of localContract.rootPolicy.allowedDirectories) fs.mkdirSync(directory);
   const requestPath = path.join(host, 'request.json');
-  fs.writeFileSync(requestPath, JSON.stringify({ contract: localContract }), { flag: 'wx' });
+  fs.writeFileSync(requestPath, JSON.stringify({ contract: localContract,
+    task: { encoding: 'utf8', text: 'p-bridge-local-mocked-ready' } }), { flag: 'wx' });
 
   const helperData = path.join(run, 'helper');
   for (const name of ['home', 'temp', 'appdata', 'localappdata']) fs.mkdirSync(path.join(helperData, name), { recursive: true });
@@ -934,8 +947,15 @@ test('the production bridge reaches a minted PreparedBoundedWorker with zero inv
   try {
     witnessed = withInvocationWitness(() => {
       const preflight = prepareProviderBackedWorker(bridgeReadyInput);
-      const ticket = bridge.authorize(preflight, localPermit, 'AUTHORIZED');
-      return { preflight, ticket, prepared: bridge.prepare(preflight, ticket) };
+      const ticket = bridge.authorize(preflight, localPermit, 'AUTHORIZED',
+        executionFor(preflight.contract, 'p-bridge-local-mocked-ready'));
+      const prepared = bridge.prepare(preflight, ticket);
+      // The first trusted launch-consumption attempt spends the once-only provider
+      // credential/task authority even though the unavailable backend refuses; the
+      // second attempt fails closed on spent authority before backend enforcement.
+      assert.throws(() => bounded.consumePreparedBoundedWorker(prepared), /BLOCKED_BACKEND_REQUIREMENT/);
+      assert.throws(() => bounded.consumePreparedBoundedWorker(prepared), /Revoked, spent or conflicting preparation authority/);
+      return { preflight, ticket, prepared };
     });
   } finally {
     net.Socket.prototype.connect = originalConnect;
@@ -1013,15 +1033,58 @@ test('the production bridge reaches a minted PreparedBoundedWorker with zero inv
   const refusals = withInvocationWitness(() => {
     assert.throws(() => bridge.prepare(preflight, ticket), /authority is absent or does not match preflight/);
     assert.throws(() => bridge.prepare(preflight, { ...ticket }), /authority is absent or does not match preflight/);
-    assert.throws(() => bridge.authorize(preflight, localPermit, 'AUTHORIZED'), /already consumed/);
+    assert.throws(() => bridge.authorize(preflight, localPermit, 'AUTHORIZED',
+      executionFor(preflight.contract, 'p-bridge-local-mocked-ready')), /already consumed/);
     assert.throws(() => bridge.prepare({ ...preflight }, ticket), /was not minted by prepareProviderBackedWorker/);
     assert.throws(() => preflightApi.createProviderWorkerBridge().prepare(preflight, ticket), /does not match preflight/);
   });
   assert.deepEqual(refusals.attempts, []);
 
-  // Neither half of this case reaches the PTY layer: no `PtyManager`,
-  // `launchOwnedPty`, `consumePreparedBoundedWorker`, provider CLI, or provider
-  // request was made, and the prepared worker was never consumed or launched.
+  // No PTY/provider invocation occurred. Trusted launch consumption was exercised only
+  // to prove that the unavailable dedicated backend refuses before a launch effect; that
+  // refused attempt nevertheless spent the once-only provider authority, and a replay is
+  // refused on spent authority before any backend enforcement.
   assert.deepEqual(witnessed.attempts, []);
   assert.deepEqual(connects, []);
+  const approvedRequest = fs.readFileSync(requestPath);
+  try {
+    fs.appendFileSync(requestPath, ' ');
+    const changed = withInvocationWitness(() =>
+      assert.throws(() => bounded.consumePreparedBoundedWorker(prepared), /approved SHA256/));
+    assert.deepEqual(changed.attempts, []);
+  } finally { fs.writeFileSync(requestPath, approvedRequest); }
+
+  // The trusted adapter also accepts the real local provider-free preparation seam.
+  // Consumption is a lifecycle transition only: no native launch is performed.
+  const freeContract = createCodexWorkerContract({ ...localIdentity, executable: localExecutable,
+    syntheticRoot: syntheticRootDir, credentialMode: 'NONE' });
+  fs.writeFileSync(requestPath, JSON.stringify({ contract: freeContract }));
+  const free = bounded.prepareBoundedWorker({ ...localPermit, requestSha256: hash(requestPath),
+    argv: [fixturePath, requestPath, 'pass'] });
+  const adapter = preflightApi.createProviderTaskResultAdapter(free);
+  const { candidateId, taskId, runId, workerId, taskDigest, sourceCheckpoint } = free.contract;
+  const result = { schemaVersion: contractApi.CODEX_WORKER_RESULT_SCHEMA_VERSION,
+    candidateId, taskId, runId, workerId, taskDigest, sourceCheckpoint,
+    result: 'PASS', checks: { credentialMode: 'PASS' }, artifacts: [] };
+  assert.throws(() => adapter.publish(result), /not live/);
+  bounded.consumePreparedBoundedWorker(free);
+  for (const invalid of [{ ...result, runId: 'stale' },
+    { ...result, checks: { mechanics: 'FAIL' } },
+    { ...result, checks: { api_key: 'PASS' } }]) assert.throws(() => adapter.publish(invalid));
+  fs.writeFileSync(free.contract.resultPolicy.resultPath, 'existing-conflict', { flag: 'wx' });
+  assert.throws(() => adapter.publish(result), /Duplicate/);
+  assert.equal(fs.readFileSync(free.contract.resultPolicy.resultPath, 'utf8'), 'existing-conflict');
+  fs.unlinkSync(free.contract.resultPolicy.resultPath);
+  const originalLink = fs.linkSync;
+  try {
+    fs.linkSync = () => { throw new Error('synthetic publication failure'); };
+    assert.throws(() => adapter.publish(result), /synthetic publication failure/);
+  } finally { fs.linkSync = originalLink; }
+  assert.equal(fs.existsSync(free.contract.resultPolicy.resultPath), false);
+  adapter.publish(result);
+  const canonical = contractApi.validateTaskResult(result, free.contract, { resultAlreadyExists: false });
+  assert.equal(fs.readFileSync(free.contract.resultPolicy.resultPath, 'utf8'), `${JSON.stringify(canonical, null, 2)}\n`);
+  assert.throws(() => adapter.publish(result), /already consumed/);
+  assert.equal(contractApi.classifyTerminal({ durableResult: 'ABSENT', processExitCode: 0,
+    cleanup: 'VERIFIED_EMPTY' }).state, 'UNKNOWN');
 });
