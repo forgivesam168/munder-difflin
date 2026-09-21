@@ -146,6 +146,100 @@ test('OMP preparation rejects dirty, ambient-rooted and non-standalone workspace
   assert.deepEqual(adapters.admitOmpPreparation(f.core, f.adapter, preparation(f)).approvedFixtureNames, ['input.txt']);
   adapters.assertOmpPreparationAdmission(f.core, f.adapter, admitted, preparation(f));
 });
+// Windows discovery-sensitive classification: the win32 filesystem resolves `mcp.json` and
+// `MCP.JSON` to the same file, so win32 must classify by case-insensitive comparison. Both
+// consumers (approved fixtures and workspace entries) must go through the one canonical helper.
+test('OMP discovery-sensitive names classify case-insensitively on win32 and exactly on case-sensitive platforms', () => {
+  const fixed = [...adapters.OMP_FORBIDDEN_WORKSPACE_ENTRIES];
+  // The case-variant loop below is only meaningful while the enumerated set is intact.
+  for (const name of ['.git', '.omp', '.claude', '.codex', '.gemini', 'mcp.json', '.mcp.json', 'AGENTS.md', 'CLAUDE.md', 'plugins'])
+    if (!fixed.includes(name)) throw new Error(`forbidden discovery-sensitive entry missing: ${name}`);
+  const caseVariants = name => [...new Set([name.toUpperCase(), name.replace(/[A-Za-z]/, c => c.toUpperCase()).toLowerCase()])]
+    .filter(variant => variant !== name);
+  for (const name of fixed) {
+    const variants = caseVariants(name);
+    assert.equal(variants.length > 0, true);
+    for (const platform of ['win32', 'linux', 'darwin'])
+      assert.equal(adapters.isForbiddenOmpDiscoveryEntry(name, platform), true);
+    for (const variant of variants) {
+      assert.equal(adapters.isForbiddenOmpDiscoveryEntry(variant, 'win32'), true);
+      for (const platform of ['linux', 'darwin'])
+        assert.equal(adapters.isForbiddenOmpDiscoveryEntry(variant, platform), false);
+    }
+  }
+  // `.env*` is open-ended and stays case-insensitively rejected on every platform.
+  for (const platform of ['win32', 'linux', 'darwin'])
+    for (const dotenv of ['.env', '.ENV', '.env.local', '.Env.Local'])
+      assert.equal(adapters.isForbiddenOmpDiscoveryEntry(dotenv, platform), true);
+  // Benign names, and case variants of benign names, are not classified as forbidden anywhere.
+  for (const platform of ['win32', 'linux', 'darwin'])
+    for (const benign of ['input.txt', 'Input.txt', 'fixture.txt', 'environment.txt', 'plugin'])
+      assert.equal(adapters.isForbiddenOmpDiscoveryEntry(benign, platform), false);
+  // The default platform is the running process platform, so production classification follows
+  // the host without any call site opt-in.
+  const windows = process.platform === 'win32';
+  assert.equal(adapters.isForbiddenOmpDiscoveryEntry('MCP.JSON'), windows);
+  assert.equal(adapters.isForbiddenOmpDiscoveryEntry('mcp.json'), true);
+});
+test('OMP preparation applies the canonical classification to approved fixtures and workspace entries', () => {
+  const f = fixture();
+  const windows = process.platform === 'win32';
+  const fixed = [...adapters.OMP_FORBIDDEN_WORKSPACE_ENTRIES];
+  const caseVariants = name => [...new Set([name.toUpperCase(), name.replace(/[A-Za-z]/, c => c.toUpperCase()).toLowerCase()])]
+    .filter(variant => variant !== name);
+  // Mirrors the fixture-name syntax contract; used only to pick the expected rejection reason.
+  const validFixtureName = name => /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/.test(name);
+  for (const name of fixed) {
+    // Exact forbidden names are refused identically on every platform, by both consumers.
+    assert.throws(() => adapters.admitOmpPreparation(f.core, f.adapter, preparation(f, {}, { entries: [name] })),
+      /Forbidden ambient entry present in workspace/);
+    assert.throws(() => adapters.admitOmpPreparation(f.core, f.adapter, preparation(f, {}, { approvedFixtureNames: [name] })),
+      /not an approved fixture file/);
+    for (const variant of caseVariants(name)) {
+      if (windows) {
+        // Windows semantics: the case variant is the same discovery-sensitive entry, so it is
+        // forbidden classification rather than an unrelated unknown entry.
+        assert.equal(adapters.isForbiddenOmpDiscoveryEntry(variant), true);
+        assert.throws(() => adapters.admitOmpPreparation(f.core, f.adapter, preparation(f, {}, { entries: [variant] })),
+          /Forbidden ambient entry present in workspace/);
+        assert.throws(() => adapters.admitOmpPreparation(f.core, f.adapter, preparation(f, {}, { approvedFixtureNames: [variant] })),
+          /not an approved fixture file/);
+        // A forbidden entry cannot be laundered by also listing it as an approved fixture.
+        assert.throws(() => adapters.admitOmpPreparation(f.core, f.adapter,
+          preparation(f, {}, { approvedFixtureNames: [variant], entries: [variant] })), /not an approved fixture file/);
+      } else {
+        // Case-sensitive semantics preserved: it is not the exact forbidden counterpart. A
+        // dot-prefixed variant additionally fails fixture syntax, so the rejection reason is
+        // platform-appropriate, and a syntactically valid variant may be admitted explicitly.
+        assert.equal(adapters.isForbiddenOmpDiscoveryEntry(variant), false);
+        assert.throws(() => adapters.admitOmpPreparation(f.core, f.adapter, preparation(f, {}, { entries: [variant] })),
+          validFixtureName(variant) ? /not an approved fixture/ : /Invalid workspace entry observation/);
+        assert.throws(() => adapters.admitOmpPreparation(f.core, f.adapter, preparation(f, {}, { approvedFixtureNames: [variant] })),
+          /not an approved fixture file/);
+        if (validFixtureName(variant))
+          assert.deepEqual(adapters.admitOmpPreparation(f.core, f.adapter,
+            preparation(f, {}, { approvedFixtureNames: [variant], entries: [variant] })).approvedFixtureNames, [variant]);
+      }
+    }
+  }
+  // A benign case variant is accepted by both consumers on every platform.
+  const benign = adapters.admitOmpPreparation(f.core, f.adapter,
+    preparation(f, {}, { approvedFixtureNames: ['Input.txt'], entries: ['Input.txt'] }));
+  assert.deepEqual(benign.approvedFixtureNames, ['Input.txt']);
+  assert.equal(benign.execution, 'NOT_RUN');
+  for (const variant of ['.ENV', '.Env.Local']) {
+    assert.equal(adapters.isForbiddenOmpDiscoveryEntry(variant), true);
+    assert.throws(() => adapters.admitOmpPreparation(f.core, f.adapter, preparation(f, {}, { entries: [variant] })),
+      /Forbidden ambient entry present in workspace/);
+    assert.throws(() => adapters.admitOmpPreparation(f.core, f.adapter, preparation(f, {}, { approvedFixtureNames: [variant] })),
+      /not an approved fixture file/);
+  }
+  // The benign approved fixture is still accepted and still re-admits unchanged.
+  const admitted = adapters.admitOmpPreparation(f.core, f.adapter, preparation(f));
+  assert.deepEqual(admitted.approvedFixtureNames, ['input.txt']);
+  assert.equal(admitted.execution, 'NOT_RUN');
+  adapters.assertOmpPreparationAdmission(f.core, f.adapter, admitted, preparation(f));
+});
 test('OMP preparation admission rejects isolation, adapter, workspace and replay substitution', () => {
   const f = fixture(); const observation = preparation(f);
   const admitted = adapters.admitOmpPreparation(f.core, f.adapter, observation);

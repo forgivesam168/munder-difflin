@@ -56,6 +56,22 @@ export const OMP_FORBIDDEN_WORKSPACE_ENTRIES = Object.freeze(['.git', '.omp', '.
 /** `.env*` is open-ended, so it is matched by shape rather than by an enumerated name list. */
 const OMP_DOTENV_RE = /^\.env/i;
 const OMP_FIXTURE_NAME_RE = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/;
+/** Lower-cased forbidden names, precomputed once: discovery-sensitive names compare on win32
+ * case-insensitively, because the win32 filesystem resolves them regardless of ASCII case. */
+const OMP_FORBIDDEN_WORKSPACE_ENTRIES_FOLDED: Readonly<Record<string, true>> = Object.freeze(
+  OMP_FORBIDDEN_WORKSPACE_ENTRIES.reduce<Record<string, true>>((folded, name) => {
+    folded[name.toLowerCase()] = true;
+    return folded;
+  }, {}));
+/** Canonical classification of one discovery-sensitive OMP workspace entry name. `.env*` stays
+ * shape-matched case-insensitively everywhere; a fixed forbidden name matches case-insensitively
+ * only on win32 and exactly on case-sensitive platforms. */
+export function isForbiddenOmpDiscoveryEntry(name: string, platform: string = process.platform): boolean {
+  return OMP_DOTENV_RE.test(name)
+    || (platform === 'win32'
+      ? OMP_FORBIDDEN_WORKSPACE_ENTRIES_FOLDED[name.toLowerCase()] === true
+      : (OMP_FORBIDDEN_WORKSPACE_ENTRIES as readonly string[]).includes(name));
+}
 const OMP_CONFIG_ROOT_NAME_RE = /^\.?[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/;
 
 export interface OmpIsolation {
@@ -277,12 +293,11 @@ export function admitOmpPreparation(core: CoreRuntimeContract, adapter: InertRun
   }
   const approved = [...workspace.approvedFixtureNames];
   for (const name of approved) {
-    if (!OMP_FIXTURE_NAME_RE.test(name) || OMP_DOTENV_RE.test(name)
-      || (OMP_FORBIDDEN_WORKSPACE_ENTRIES as readonly string[]).includes(name)) throw new Error('Approved fixture name is not an approved fixture file');
+    if (!OMP_FIXTURE_NAME_RE.test(name) || isForbiddenOmpDiscoveryEntry(name)) throw new Error('Approved fixture name is not an approved fixture file');
   }
   for (const name of workspace.entries) {
     if (typeof name !== 'string') throw new Error('Invalid workspace entry observation');
-    if (OMP_DOTENV_RE.test(name) || (OMP_FORBIDDEN_WORKSPACE_ENTRIES as readonly string[]).includes(name)) {
+    if (isForbiddenOmpDiscoveryEntry(name)) {
       if (!approved.includes(name)) throw new Error(`Forbidden ambient entry present in workspace: ${name}`);
       continue;
     }
