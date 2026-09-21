@@ -1,3 +1,16 @@
+# 2026-09-21 Windows discovery-name canonicalization repair — REVIEW_ACCEPTED_WITH_RESIDUALS
+
+External exact-SHA blocker against checkpoint `d791889d4f63d30d6163eb059dbe065d35caf776`已閉合。Accepted local implementation commit=`37318ac68c693a8a81987834c4acfd6579428c90` (`fix: canonicalize OMP discovery names`)；本 repair 僅改Windows fixed forbidden workspace-name分類，未重開environment、argv、ModelAccessAuthority、Codex、preparation inspector或attempt-ledger設計。
+
+- VERIFIED candidate：exact paths=`src/main/runtimeAdapter.ts`、`test/omp-adapter-semantics.test.cjs`；frozen pre-commit SHA256=`f378f8f1c8ee54ccd772c2409202ea030b9f14d3f6e41e80a2b712202ad92623` / `147352a70d57c8a208a8fa1badfedcd29e35c3973d01c1d978fde9247105a657`。兩candidate paths commit後clean。
+- VERIFIED canonical rule：唯一helper `isForbiddenOmpDiscoveryEntry(name, platform=process.platform)`先以`/^\.env/i`拒絕全平台`.env*`；固定名在`win32`以預先lowercase lookup table作case-insensitive比較，非win32維持exact-case `includes`。同一helper同時供`approvedFixtureNames`及`workspace.entries`使用，無duplicated comparison。
+- VERIFIED coverage：固定集`.git .omp .claude .codex .gemini mcp.json .mcp.json AGENTS.md CLAUDE.md plugins`的exact names及case variants均測試；Windows下兩consumer皆拒絕且不可藉approved list洗白。平台參數化helper測試在Windows host亦執行linux/darwin exact-case語意；benign `Input.txt`仍可admit，`.ENV/.Env.Local`仍雙consumer拒絕。Dot-prefix fixture syntax的獨立拒絕保持。
+- VERIFIED authoritative validation：focused OMP/authority=`96 total / 96 pass / 0 fail / 0 skipped / 0 cancelled`, exit0；runtime regression=`64/64 pass`, exit0；Node TypeScript exit0；Web TypeScript exit0；`npm run build` exit0（main87/preload1/renderer2588）；candidate-scoped `git diff --check` exit0。Developer曾越權跑`node --check`，該證據已拒絕，Main authoritative runs取代。
+- VERIFIED reviews：independent correctness=`PASS`、0 blocker/UNKNOWN；independent risk=`PASS_WITH_RESIDUALS`、0 blocker。Risk residual：既有`approvedFixtureNames`元素缺少explicit `typeof string` check，regex可能coerce non-string；非本repair引入，且目前inert。非Windowshost的完整admission branch未在實際non-Windows runtime執行，但parameterized helper semantics已執行。
+- Preserved：deterministic argv、environment contract、ModelAccessAuthority、`network=NOT_AUTHORIZED`、`execution=NOT_RUN`、`credentials=NONE`。OMP/CLIProxyAPI/model/provider/network/credential均未執行；preparation inspector未實作；push=`NO`；No CI configured。
+- BLOCKED invariant：`ATTEMPT_LEDGER_ACL = BLOCKED_BY_SAME_WINDOWS_PRINCIPAL`，此repair未修改或弱化。
+
+
 # 2026-09-21 OMP discovery isolation repair — REVIEW_ACCEPTED_WITH_RESIDUALS
 
 Candidate status=`REVIEW_ACCEPTED_WITH_RESIDUALS`。Starting accepted checkpoint=`422e5f5d9803ae89289a54f8bc1ebd7f0faa5c1f`；accepted local implementation commit=`cec1ffcb3baae2449a6f00e737a0468fbf8ecac4` (`feat: bind OMP discovery isolation`)。本 slice 僅閉合 installed OMP 18.2.7 first-proof 的 inert discovery/config isolation representation；未啟動 OMP、CLIProxyAPI、model/provider、credential/network，亦未修改 attempt-ledger principal design。
