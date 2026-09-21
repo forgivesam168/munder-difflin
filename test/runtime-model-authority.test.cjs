@@ -27,7 +27,8 @@ test('same Core result and once-only authority semantics cover distinct inert Co
   assert.equal(codex.adapter.config.environmentKey, 'CODEX_HOME');
   assert.equal(omp.adapter.config.environmentKey, 'PI_CODING_AGENT_DIR');
   assert.deepEqual(omp.adapter.args, ['--print', '--mode', 'json', '--no-session', '--cwd', omp.core.rootPolicy.workDir,
-    '--model', 'cliproxyapi/independent-model', '--thinking', 'high', '--approval-mode', 'yolo', '--max-time', '60s']);
+    '--model', 'cliproxyapi/independent-model', '--thinking', 'high', '--approval-mode', 'yolo', '--max-time', '60s',
+    '--no-tools', '--no-extensions', '--no-skills', '--no-rules', '--no-lsp']);
   assert.equal(omp.adapter.thinkingLevel, 'high');
   assert.equal(omp.adapter.taskDelivery, 'RAW_PIPE_EXACT_BYTES_THEN_EOF');
   assert.equal(omp.adapter.approval, 'YOLO_TOOL_POLICIES_STILL_APPLY');
@@ -232,4 +233,41 @@ test('authority rejects isolated scheme and trust-class substitutions and endpoi
     }
     assert.equal(f.issuer.consume(f.handle, f.core, f.adapter, f.route).execution, 'NOT_RUN');
   }
+});
+test('authority rejects coherent OMP models representation, config-variable and discovery-flag substitutions', () => {
+  const f = fixture('omp', {}, { trustClass: 'LOCAL_LOOPBACK', endpoint: 'http://localhost:8317' });
+  const isolation = f.adapter.config.isolation;
+  const substitute = (patch) => ({ ...f.adapter, config: { ...f.adapter.config, isolation: { ...isolation, ...patch } } });
+  const withModelsYaml = (yaml) => substitute({ modelsYaml: yaml });
+  // A coherently re-encoded models representation is still required to match exactly: an endpoint,
+  // wire-api, provider or model change inside modelsYaml is refused at the issuer boundary.
+  assert.throws(() => f.issuer.consume(f.handle, f.core,
+    withModelsYaml(JSON.stringify({ providers: { cliproxyapi: { baseUrl: 'http://localhost:8318/v1',
+      api: 'openai-responses', models: [{ id: f.route.model }] } } }, null, 2) + '\n'), f.route), /substitution/);
+  assert.throws(() => f.issuer.consume(f.handle, f.core,
+    withModelsYaml(JSON.stringify({ providers: { cliproxyapi: { baseUrl: f.route.endpoint + '/v1',
+      api: 'openai-responses', models: [{ id: 'substituted-model' }] } } }, null, 2) + '\n'), f.route), /substitution/);
+  assert.throws(() => f.issuer.consume(f.handle, f.core,
+    withModelsYaml(JSON.stringify({ providers: { cliproxyapi: { baseUrl: f.route.endpoint + '/v1',
+      api: 'openai-chat', models: [{ id: f.route.model }] } } }, null, 2) + '\n'), f.route), /substitution/);
+  // Re-serializing the same representation with different whitespace is still a mismatch.
+  assert.throws(() => f.issuer.consume(f.handle, f.core,
+    withModelsYaml(JSON.stringify(JSON.parse(isolation.modelsYaml))), f.route), /substitution/);
+  for (const patch of [{ configRootName: '.other' }, { modelsFile: 'C:\\host\\models.yml' },
+    { environment: { ...isolation.environment, PI_CONFIG_DIR: 'other-root' } },
+    { environment: { ...isolation.environment, PI_CODING_AGENT_DIR: isolation.environment.PI_CONFIG_DIR } },
+    { environmentSemantics: { ...isolation.environmentSemantics, PI_CONFIG_DIR: 'SYNTHETIC_ABSOLUTE_NATIVE_DIRECTORY' } },
+    { discoveryDisableFlags: isolation.discoveryDisableFlags.slice(1) },
+    { discoveryDisableFlags: [...isolation.discoveryDisableFlags].reverse() },
+    { externalHomes: isolation.externalHomes.slice(1) }, { inheritEnvironment: true }, { extra: true }]) {
+    assert.throws(() => f.issuer.consume(f.handle, f.core, substitute(patch), f.route), /substitution/);
+  }
+  assert.equal(f.issuer.consume(f.handle, f.core, f.adapter, f.route).network, 'NOT_AUTHORIZED');
+});
+test('authority refuses an injected isolation representation on the isolation-free Codex descriptor', () => {
+  const f = fixture();
+  assert.equal(f.adapter.config.isolation, undefined);
+  assert.throws(() => f.issuer.consume(f.handle, f.core,
+    { ...f.adapter, config: { ...f.adapter.config, isolation: { environment: {} } } }, f.route), /substitution/);
+  assert.equal(f.issuer.consume(f.handle, f.core, f.adapter, f.route).execution, 'NOT_RUN');
 });
