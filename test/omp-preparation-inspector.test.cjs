@@ -10,6 +10,30 @@ const coreApi = loadTs('src/main/codexWorkerContract.ts');
 const adapters = loadTs('src/main/runtimeAdapter.ts');
 const inspector = loadTs('src/main/ompPreparationInspector.ts');
 const sha = bytes => createHash('sha256').update(bytes).digest('hex');
+/** Records every filesystem read the inspector could route content or directory enumeration
+ * through, so a test can assert that a stand-in's contents were never requested and that no
+ * directory beneath a rejected ancestor was opened. Restored even when `run` throws. */
+function watchInspectionReads(run) {
+  const contents = []; const opened = [];
+  const read = fs.readFileSync; const open = fs.opendirSync;
+  fs.readFileSync = function (target, ...rest) { contents.push(String(target)); return read.call(this, target, ...rest); };
+  fs.opendirSync = function (target, ...rest) { opened.push(String(target)); return open.call(this, target, ...rest); };
+  try { run(); } finally { fs.readFileSync = read; fs.opendirSync = open; }
+  return { contents, opened };
+}
+/** A Uint8Array-compatible byte source that records the element/`length`/`valueOf` access any
+ * Buffer.from-style copy performs. Validation alone never reads those, so a recorded touch is
+ * observable proof that a private byte snapshot was taken; a plain Buffer records nothing. */
+function watchedBytes(bytes, name) {
+  const touches = [];
+  const proxy = new Proxy(bytes, {
+    get(target, key) {
+      if (typeof key === 'string' && (/^(?:0|[1-9][0-9]*)$/.test(key) || key === 'length' || key === 'valueOf')) touches.push(key);
+      return Reflect.get(target, key, target);
+    }
+  });
+  return { fixture: { name, bytes: proxy }, touches };
+}
 // Main may pin an authorized, discovery-clean temporary base. On Windows use the
 // repository volume root, not os.tmpdir(), which normally inherits Human home.
 // Never bypass production ancestor checks or retry elsewhere after a refusal.
@@ -95,7 +119,8 @@ test('approved fixture binds exact binary bytes and later modification is reject
   fs.writeFileSync(path.join(f.core.rootPolicy.workDir, 'input.bin'), Buffer.alloc(5, 8));
   assert.throws(() => f.admit(h), /bytes\/hash mismatch/);
 });
-for (const name of ['unapproved.txt', '.git', '.omp', 'MCP.JSON', 'aGeNtS.Md', '.ENV.secret', 'plugins']) {
+for (const name of ['unapproved.txt', '.git', '.omp', 'MCP.JSON', 'aGeNtS.Md', '.ENV.secret', 'plugins',
+  '.agent', '.agents', '.AGENTS']) {
   test(`real workspace enumeration refuses ${name}`, t => {
     const f = fixture(t); const h = f.prepare(); fs.writeFileSync(path.join(f.core.rootPolicy.workDir, name), 'inert');
     assert.throws(() => f.admit(h), /Discovery-sensitive|Unexpected synthetic/);
@@ -129,8 +154,12 @@ test('aggregate approved fixture bytes are refused before any synthetic root eff
   const f = fixture(t);
   // One shared 1 MiB buffer: the aggregate gate must reject the count, not the per-fixture size.
   const shared = Buffer.alloc(1024 * 1024, 7);
-  f.input.fixtures = Array.from({ length: 17 }, (_, index) => ({ name: `part-${index}.bin`, bytes: shared }));
+  const sources = Array.from({ length: 17 }, (_, index) => watchedBytes(shared, `part-${index}.bin`));
+  f.input.fixtures = sources.map(entry => entry.fixture);
   assert.throws(f.prepare, /Approved fixture byte budget exceeded/);
+  // Whole-list acceptance precedes copying: no accepted request means no source byte was ever read,
+  // so no private snapshot could have been materialized from the rejected list.
+  assert.deepEqual(sources.flatMap(entry => entry.touches), []);
   assert.equal(fs.existsSync(f.core.rootPolicy.root), false);
   assert.deepEqual(fs.readdirSync(f.base), []);
 });
@@ -162,6 +191,87 @@ test('discovery-sensitive exact ancestor is rejected without reading sibling con
 test('ancestor discovery case and trailing aliases are rejected', t => {
   const f = fixture(t); fs.mkdirSync(path.join(f.base, 'PLUGINS'));
   assert.throws(f.prepare, /Discovery-sensitive ancestor/);
+});
+for (const name of ['.agent', '.agents']) {
+  test(`real ancestor ${name} is rejected`, t => {
+    const f = fixture(t); fs.mkdirSync(path.join(f.base, name));
+    assert.throws(f.prepare, /Discovery-sensitive ancestor/);
+    assert.equal(fs.existsSync(f.core.rootPolicy.root), false);
+  });
+}
+// The ancestor classifier folds with win32 semantics on every host, so `.AGENT`/`.Agent`/
+// `.AGENTS`/`.Agents` are the same discovery-sensitive ancestor as `.agent`/`.agents`.
+for (const name of ['.AGENT', '.Agent', '.AGENTS', '.Agents']) {
+  test(`real ancestor Windows case variant ${name} is rejected`, t => {
+    const f = fixture(t); fs.mkdirSync(path.join(f.base, name));
+    assert.throws(f.prepare, /Discovery-sensitive ancestor/);
+    assert.equal(fs.existsSync(f.core.rootPolicy.root), false);
+  });
+}
+test('ancestor trailing-dot and trailing-space spellings are fail-closed where the filesystem permits', t => {
+  for (const name of ['.agent.', '.agent ']) {
+    const f = fixture(t);
+    try { fs.mkdirSync(path.join(f.base, name)); }
+    catch (error) {
+      // The host refuses the spelling itself. Prove no alias was materialized and that the
+      // requested spelling still cannot slip an ancestor past classification.
+      assert.ok(['EINVAL', 'ENOENT', 'EPERM', 'EACCES'].includes(error.code));
+      assert.deepEqual(fs.readdirSync(f.base), []);
+      continue;
+    }
+    assert.throws(f.prepare, /Discovery-sensitive ancestor/);
+    assert.equal(fs.existsSync(f.core.rootPolicy.root), false);
+  }
+});
+test('ancestor lookalike files: forbidden names rejected by name, harmless stand-ins tolerated', t => {
+  for (const name of ['AGENTS.md', 'CLAUDE.md', 'mcp.json', '.mcp.json', 'plugins']) {
+    const f = fixture(t);
+    const standin = path.join(f.base, name);
+    fs.writeFileSync(standin, 'never read');
+    const observed = watchInspectionReads(() => assert.throws(f.prepare, /Discovery-sensitive ancestor/));
+    assert.deepEqual(observed.contents, [], `stand-in ${name} content must never be read`);
+    assert.equal(fs.readFileSync(standin, 'utf8'), 'never read');
+    assert.equal(fs.existsSync(f.core.rootPolicy.root), false);
+  }
+  for (const name of ['SYSTEM.md', 'SYSTEM_TEMPLATE.md', 'agent.md', 'agents.txt']) {
+    const f = fixture(t);
+    fs.writeFileSync(path.join(f.base, name), 'harmless stand-in');
+    const handle = f.prepare(); // a lookalike name is not a discovery-sensitive ancestor
+    assert.equal(fs.existsSync(f.core.rootPolicy.root), true);
+    assert.equal(f.admit(handle).evidence.ancestors[0].root, f.core.rootPolicy.workDir);
+  }
+});
+test('forbidden ancestor stand-in contents are never read, while a clean ancestor path still succeeds', t => {
+  const f = fixture(t);
+  const forbiddenDir = path.join(f.base, '.agents');
+  fs.mkdirSync(forbiddenDir);
+  const standins = [path.join(forbiddenDir, 'AGENTS.md'), path.join(forbiddenDir, 'SYSTEM.md'),
+    path.join(forbiddenDir, 'SYSTEM_TEMPLATE.md'), path.join(f.base, 'SYSTEM.md'), path.join(f.base, 'SYSTEM_TEMPLATE.md')];
+  for (const standin of standins) fs.writeFileSync(standin, 'never read');
+  // Rejection comes from the ancestor's entry NAME: the forbidden directory is never opened and no
+  // stand-in content is read, by recursive descent or otherwise.
+  const observed = watchInspectionReads(() => assert.throws(f.prepare, /Discovery-sensitive ancestor/));
+  assert.deepEqual(observed.contents, []);
+  assert.ok(!observed.opened.some(target => target.startsWith(forbiddenDir)), `forbidden ancestor must not be enumerated: ${observed.opened}`);
+  for (const standin of standins) assert.equal(fs.readFileSync(standin, 'utf8'), 'never read');
+  fs.rmSync(forbiddenDir, { recursive: true, force: true });
+  // The identical request now runs to completion: the refusal came from the ancestor entry name,
+  // and the harmless sibling stand-ins are neither forbidden nor read.
+  const handle = f.prepare();
+  assert.equal(fs.existsSync(f.core.rootPolicy.root), true);
+  assert.equal(f.admit(handle).evidence.ancestors[0].root, f.core.rootPolicy.workDir);
+});
+test('accepted fixtures still take private snapshots after whole-list acceptance', t => {
+  const f = fixture(t); const bytes = Buffer.from([1, 2, 3, 4]);
+  const watched = watchedBytes(bytes, 'input.bin');
+  f.input.fixtures = [watched.fixture];
+  const handle = f.prepare();
+  // Acceptance precedes copying: validation alone never reads an element byte, so an element read
+  // here is observable proof that the accepted fixture was privately snapshotted.
+  assert.ok(watched.touches.includes('0'), `accepted fixture bytes must be read for the private snapshot: ${watched.touches}`);
+  assert.deepEqual(f.admit(handle).evidence.fixtures, [{ name: 'input.bin', sha256: sha(bytes) }]);
+  bytes.fill(9);
+  assert.equal(f.admit(handle).evidence.fixtures[0].sha256, sha(Buffer.from([1, 2, 3, 4])));
 });
 test('directory junction or symlink replacement is refused without touching its target', t => {
   const f = fixture(t); const h = f.prepare(); const target = path.join(f.owned, 'link-target'); fs.mkdirSync(target);

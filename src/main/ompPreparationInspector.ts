@@ -206,19 +206,28 @@ export function inspectOmpPreparation(input: OmpPreparationInput): OmpPreparatio
   if (input.fixtures !== undefined && (!Array.isArray(input.fixtures) || input.fixtures.length > MAX_ENTRIES)) {
     throw new Error('Invalid approved fixture list');
   }
-  // Integer-safe aggregate gate: the running sum is exact (bounded by MAX_ENTRIES * MAX_FIXTURE_BYTES,
-  // far below Number.MAX_SAFE_INTEGER) and it is evaluated after each entry's own bound but before that
-  // entry is copied, before any filesystem effect. A rejected request never materializes a private snapshot.
+  // Pass 1 — whole-list acceptance only: per-entry object/name/Uint8Array and per-file bound, an
+  // integer-safe running aggregate (bounded by MAX_ENTRIES * MAX_FIXTURE_BYTES, far below
+  // Number.MAX_SAFE_INTEGER), and case-insensitive duplicate rejection. Nothing here calls
+  // Buffer.from or touches the filesystem, so a rejected request never materializes a private
+  // snapshot and never reaches any filesystem effect.
+  const approved = input.fixtures ?? [];
+  const approvedNames = new Set<string>();
   let approvedFixtureBytes = 0;
-  const fixtures = (input.fixtures ?? []).map(f => {
-    if (!f || typeof f.name !== 'string' || !/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/.test(f.name)
-      || alias(f.name) || forbidden(f.name)) throw new Error('Invalid approved fixture name');
-    if (!(f.bytes instanceof Uint8Array) || f.bytes.byteLength > MAX_FIXTURE_BYTES) throw new Error('Invalid approved fixture bytes');
-    approvedFixtureBytes += f.bytes.byteLength;
+  for (const fixture of approved) {
+    if (!fixture || typeof fixture.name !== 'string' || !/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/.test(fixture.name)
+      || alias(fixture.name) || forbidden(fixture.name)) throw new Error('Invalid approved fixture name');
+    if (!(fixture.bytes instanceof Uint8Array) || fixture.bytes.byteLength > MAX_FIXTURE_BYTES) throw new Error('Invalid approved fixture bytes');
+    approvedFixtureBytes += fixture.bytes.byteLength;
     if (approvedFixtureBytes > MAX_TOTAL_FIXTURE_BYTES) throw new Error('Approved fixture byte budget exceeded');
-    return { name: f.name, bytes: Buffer.from(f.bytes) };
-  }).sort((a, b) => a.name < b.name ? -1 : a.name > b.name ? 1 : 0);
-  if (fixtures.length > MAX_ENTRIES || new Set(fixtures.map(f => f.name.toLowerCase())).size !== fixtures.length) throw new Error('Duplicate or excessive approved fixtures');
+    const folded = fixture.name.toLowerCase();
+    if (approvedNames.has(folded)) throw new Error('Duplicate or excessive approved fixtures');
+    approvedNames.add(folded);
+  }
+  // Pass 2 — snapshot, then order. Only whole-list-accepted entries are copied, and the issuer
+  // owns each private copy rather than the caller's mutable buffer.
+  const fixtures = approved.map(fixture => ({ name: fixture.name, bytes: Buffer.from(fixture.bytes) }))
+    .sort((a, b) => a.name < b.name ? -1 : a.name > b.name ? 1 : 0);
   const roots = ambient(home, repository);
   if (roots.some(({ root }) => overlap(core.rootPolicy.root, root))) throw new Error('PREPARATION_BASE_UNAVAILABLE: ambient overlap');
   ancestors(base);

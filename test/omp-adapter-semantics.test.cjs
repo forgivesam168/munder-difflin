@@ -152,7 +152,7 @@ test('OMP preparation rejects dirty, ambient-rooted and non-standalone workspace
 test('OMP discovery-sensitive names classify case-insensitively on win32 and exactly on case-sensitive platforms', () => {
   const fixed = [...adapters.OMP_FORBIDDEN_WORKSPACE_ENTRIES];
   // The case-variant loop below is only meaningful while the enumerated set is intact.
-  for (const name of ['.git', '.omp', '.claude', '.codex', '.gemini', 'mcp.json', '.mcp.json', 'AGENTS.md', 'CLAUDE.md', 'plugins'])
+  for (const name of ['.git', '.omp', '.claude', '.codex', '.gemini', '.agent', '.agents', 'mcp.json', '.mcp.json', 'AGENTS.md', 'CLAUDE.md', 'plugins'])
     if (!fixed.includes(name)) throw new Error(`forbidden discovery-sensitive entry missing: ${name}`);
   const caseVariants = name => [...new Set([name.toUpperCase(), name.replace(/[A-Za-z]/, c => c.toUpperCase()).toLowerCase()])]
     .filter(variant => variant !== name);

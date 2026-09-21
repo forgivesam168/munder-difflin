@@ -53,7 +53,7 @@ export const OMP_CONFIG_ROOT_NAME = '.pi-config';
  * that any unrelated discovery path is disabled: real conformance stays UNKNOWN. */
 export const OMP_DISCOVERY_DISABLE_FLAGS = Object.freeze(['--no-tools', '--no-extensions', '--no-skills', '--no-rules', '--no-lsp'] as const);
 export const OMP_FORBIDDEN_WORKSPACE_ENTRIES = Object.freeze(['.git', '.omp', '.claude', '.codex', '.gemini',
-  'mcp.json', '.mcp.json', 'AGENTS.md', 'CLAUDE.md', 'plugins'] as const);
+  '.agent', '.agents', 'mcp.json', '.mcp.json', 'AGENTS.md', 'CLAUDE.md', 'plugins'] as const);
 /** `.env*` is open-ended, so it is matched by shape rather than by an enumerated name list. */
 const OMP_DOTENV_RE = /^\.env/i;
 const OMP_FIXTURE_NAME_RE = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/;
