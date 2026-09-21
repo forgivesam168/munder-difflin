@@ -2,6 +2,7 @@ import { createHash } from 'node:crypto';
 import { win32, posix } from 'node:path';
 import { createCoreRuntimeContract, isCanonicalAbsolutePath, isPathWithin, normalizeRuntimeExecutableDescriptor,
   type CoreRuntimeContract, type RuntimeExecutableDescriptor } from './codexWorkerContract';
+import { consumeOmpPreparationEvidence, type OmpPreparationHandle } from './ompPreparationInspector';
 
 /** Narrow hardened boundary, deliberately not a second AgentProviderPreset registry.
  * These descriptors cannot launch and grant no filesystem, process or network authority. */
@@ -180,8 +181,8 @@ export function describeInertRuntime(adapterId: RuntimeAdapterId, core: CoreRunt
     coreDigest: coreScopeDigest(core) });
 }
 
-/** Host observations for one provider-free OMP preparation. Every field is an observation the
- * caller must hold; the validator never reads the filesystem itself and never launches. */
+/** FIXTURE / TEST compatibility only: caller attestations are not Main filesystem evidence.
+ * Production-shaped callers must use admitInspectedOmpPreparation instead. */
 export interface OmpPreparationEnvironmentObservation {
   readonly inheritEnvironment: boolean;
   readonly environment: Readonly<Record<string, string>>;
@@ -241,9 +242,8 @@ function samePath(a: string, b: string): boolean { return process.platform === '
 function isSymmetricWithin(a: string, b: string): boolean {
   return samePath(a, b) || isPathWithin(a, b) || isPathWithin(b, a);
 }
-/** Requires evidence binding the adapter, the exact minimal child environment, and a newly
- * created, standalone, link-free fixture-only workspace. Nothing here may infer cleanliness
- * from a work directory merely existing. */
+/** FIXTURE / TEST compatibility validator. This does not establish filesystem provenance
+ * and must never be used as the production-shaped preparation admission path. */
 export function admitOmpPreparation(core: CoreRuntimeContract, adapter: InertRuntimeDescriptor,
   observation: OmpPreparationObservation): OmpPreparationAdmission {
   if (adapter.adapterId !== 'omp' || !adapter.config.isolation) throw new Error('OMP isolation required for preparation admission');
@@ -293,7 +293,7 @@ export function admitOmpPreparation(core: CoreRuntimeContract, adapter: InertRun
   }
   const approved = [...workspace.approvedFixtureNames];
   for (const name of approved) {
-    if (!OMP_FIXTURE_NAME_RE.test(name) || isForbiddenOmpDiscoveryEntry(name)) throw new Error('Approved fixture name is not an approved fixture file');
+    if (typeof name !== 'string' || !OMP_FIXTURE_NAME_RE.test(name) || isForbiddenOmpDiscoveryEntry(name)) throw new Error('Approved fixture name is not an approved fixture file');
   }
   for (const name of workspace.entries) {
     if (typeof name !== 'string') throw new Error('Invalid workspace entry observation');
@@ -333,4 +333,16 @@ export function assertOmpPreparationAdmission(core: CoreRuntimeContract, adapter
   for (const key of expected.environmentKeys) {
     if (!samePath(admission.environment[key], expected.environment[key])) throw new Error('OMP preparation admission substitution refused');
   }
+}
+
+/** Main-inspected, preparation-only admission. No process, network or credential capability.
+ * The issuer checks identity in its private WeakMap; structural lookalikes are rejected. */
+export function admitInspectedOmpPreparation(core: CoreRuntimeContract, adapter: InertRuntimeDescriptor,
+  handle: OmpPreparationHandle) {
+  const evidence = consumeOmpPreparationEvidence(handle, core, adapter);
+  return Object.freeze({ schema: 'OMP_MAIN_INSPECTED_PREPARATION_ADMISSION' as const,
+    provenance: 'MAIN_INSPECTED' as const, evidenceDigest: evidence.digest,
+    evidence, admission: 'PREPARATION_ONLY_NO_LAUNCH' as const,
+    authority: 'PREPARATION_EVIDENCE_ONLY' as const,
+    execution: 'NOT_RUN' as const, network: 'NOT_AUTHORIZED' as const, credentials: 'NONE' as const });
 }
