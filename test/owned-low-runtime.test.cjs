@@ -3,6 +3,7 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
+const os = require('node:os');
 const crypto = require('node:crypto');
 const { spawnSync } = require('node:child_process');
 const { launchOwnedPty } = require('./load-ts.cjs')('src/main/windowsOwnedPty.ts');
@@ -28,8 +29,9 @@ test('launch schema rejects missing, alias, unknown, extra and incompatible secu
 
 test('provider-free production security boundary and RAW_PIPE lifecycle', { timeout: 240000 }, async t => {
   assert.equal(process.platform, 'win32', 'Windows proof is required, not skipped');
-  // All generated artifacts remain under the explicitly test-owned subtree.
-  const run = fs.mkdtempSync(path.join(__dirname, 'owned-low-run-'));
+  // Cleanup owns only this invocation's exclusive directory, never historical roots.
+  const run = fs.mkdtempSync(path.join(os.tmpdir(), 'munder-owned-low-run-'));
+  t.after(() => fs.rmSync(run, { recursive: true, force: true }));
   const helperPath = 'C:\\Program Files\\PowerShell\\7\\pwsh.exe';
   const executablePath = path.join(run, 'OwnedLowChild.exe');
   const scriptPath = path.join(repository, 'src/main/windowsOwnedPty.ps1');

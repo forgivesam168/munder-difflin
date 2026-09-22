@@ -145,7 +145,8 @@ export function createDurableAttemptReservationStore(evidenceDirectory: string) 
   }
   // No directory creation: provisioning and its ACL proof belong to Main.
   const directory = canonicalDirectory(evidenceDirectory);
-  const handles = new WeakMap<object, { binding: string; receiptPath: string }>();
+  const handles = new WeakMap<object, Readonly<{ binding: string; evidenceDirectory: string; receiptPath: string; attemptIdentityPath: string;
+    expectedFiles: readonly Readonly<{ path: string; bytesBase64: string; sha256: string }>[] }>>();
   return Object.freeze({
     reserve(core: CoreRuntimeContract, adapter: InertRuntimeDescriptor, route: ModelRoute,
       humanAuthorizationEvidenceId: string): object {
@@ -183,19 +184,32 @@ export function createDurableAttemptReservationStore(evidenceDirectory: string) 
       const attemptKey = createHash('sha256').update(JSON.stringify([
         core.candidateId, core.taskId, core.runId, core.workerId
       ])).digest('hex');
-      reserveFile(join(directory, `attempt-identity-${attemptKey}.json`));
+      const attemptIdentityPath = join(directory, `attempt-identity-${attemptKey}.json`);
+      reserveFile(attemptIdentityPath);
       const handle = Object.freeze(Object.defineProperty({}, 'toJSON', {
         value: () => { throw new Error('Reservation handle is not serializable'); }
       }));
-      handles.set(handle, { binding, receiptPath });
+      const bytesBase64 = Buffer.from(bytes, 'utf8').toString('base64');
+      const sha256 = createHash('sha256').update(bytes, 'utf8').digest('hex');
+      const expectedFiles = Object.freeze([receiptPath, attemptIdentityPath].map(path => Object.freeze({ path, bytesBase64, sha256 })));
+      handles.set(handle, Object.freeze({ binding, evidenceDirectory: directory, receiptPath, attemptIdentityPath, expectedFiles }));
       return handle;
+    },
+    inspect(handle: unknown, core: CoreRuntimeContract, adapter: InertRuntimeDescriptor, route: ModelRoute) {
+      const state = handle && typeof handle === 'object' ? handles.get(handle) : undefined;
+      if (!state) throw new Error('Forged, foreign or spent reservation');
+      if (accessBinding(core, adapter, route) !== state.binding) throw new Error('Reservation scope substitution');
+      return Object.freeze({ evidenceDirectory: state.evidenceDirectory, receiptPath: state.receiptPath,
+        attemptIdentityPath: state.attemptIdentityPath, expectedFiles: state.expectedFiles, bindingDigest: state.binding,
+        authority: 'RESERVATION_ONLY', network: 'NOT_AUTHORIZED', execution: 'NOT_RUN' } as const);
     },
     consume(handle: unknown, core: CoreRuntimeContract, adapter: InertRuntimeDescriptor, route: ModelRoute) {
       const state = handle && typeof handle === 'object' ? handles.get(handle) : undefined;
       if (!state) throw new Error('Forged, foreign or spent reservation');
       if (accessBinding(core, adapter, route) !== state.binding) throw new Error('Reservation scope substitution');
       handles.delete(handle as object);
-      return Object.freeze({ receiptPath: state.receiptPath, bindingDigest: state.binding,
+      return Object.freeze({ evidenceDirectory: state.evidenceDirectory, receiptPath: state.receiptPath,
+        attemptIdentityPath: state.attemptIdentityPath, expectedFiles: state.expectedFiles, bindingDigest: state.binding,
         authority: 'RESERVATION_ONLY', network: 'NOT_AUTHORIZED', execution: 'NOT_RUN' } as const);
     }
   });
