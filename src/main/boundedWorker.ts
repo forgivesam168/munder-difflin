@@ -116,7 +116,7 @@ export interface BoundedWorkerPermit {
    * outside the synthetic root; APPDATA/LOCALAPPDATA are validated the same way
    * when present.
    */
-  readonly ownedBackend: Omit<OwnedPtyLaunch, 'executablePath' | 'executableSha256' | 'args' | 'cwd' | 'env'>;
+  readonly ownedBackend: Omit<OwnedPtyLaunch, 'securityContext' | 'executablePath' | 'executableSha256' | 'args' | 'cwd' | 'env'>;
   /** Explicit PATH value; every entry must be a canonical empty directory inside the synthetic root. */
   readonly workerPath: string;
   readonly limits: BoundedWorkerLimits;
@@ -401,14 +401,14 @@ function readLimits(value: unknown): BoundedWorkerLimits {
 /** Native backend inputs: identities proven, bounds positive, environment explicit. */
 function readOwnedBackend(
   value: unknown, syntheticRoot: string
-): Omit<OwnedPtyLaunch, 'executablePath' | 'executableSha256' | 'args' | 'cwd' | 'env'> {
+): Omit<OwnedPtyLaunch, 'securityContext' | 'executablePath' | 'executableSha256' | 'args' | 'cwd' | 'env'> {
   if (typeof value !== 'object' || value === null || Array.isArray(value)) throw new Error('Invalid bounded worker owned backend');
   exactKeys(
     value as Record<string, unknown>,
     ['helperPath', 'helperSha256', 'scriptPath', 'scriptSha256', 'nativeSourcePath', 'nativeSourceSha256', 'helperEnv', 'cols', 'rows', 'timeoutMs', 'cleanupMs'],
     'bounded worker owned backend'
   );
-  const backend = value as Omit<OwnedPtyLaunch, 'executablePath' | 'executableSha256' | 'args' | 'cwd' | 'env'>;
+  const backend = value as Omit<OwnedPtyLaunch, 'securityContext' | 'executablePath' | 'executableSha256' | 'args' | 'cwd' | 'env'>;
   const helperPath = assertApprovedLocalPath(backend.helperPath, 'Bounded worker helper path');
   const helperSha256 = assertSha256(backend.helperSha256, 'Bounded worker helper SHA256');
   assertApprovedFileDigest(helperPath, 'Bounded worker helper', helperSha256, MAX_APPROVED_FILE_BYTES);
@@ -721,7 +721,7 @@ export function prepareBoundedWorker(permit: BoundedWorkerPermit, providerBridge
   }
   let launch: OwnedPtyLaunch = Object.freeze({
     ...backend, executablePath, executableSha256: contract.executable.executableSha256,
-    args, cwd: rootPolicy.workDir, env, ioMode: provider ? 'RAW_PIPE' : 'CONPTY'
+    args, cwd: rootPolicy.workDir, env, ioMode: provider ? 'RAW_PIPE' : 'CONPTY', securityContext: 'CURRENT_PROCESS'
   });
   const providerEvidence = provider
     ? bindProviderBackendLaunch(bridge!.execution, contract, bridge!.evidence, launch) : undefined;

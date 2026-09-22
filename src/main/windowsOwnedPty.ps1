@@ -109,6 +109,9 @@ function Write-FailureReceipt {
     $receipt = [ordered]@{
         type = 'exit'
         receipt = [ordered]@{
+            securityContext = $selectedSecurityContext
+            restrictedTokenVerified = $false
+            childTokenVerified = $false
             rootPid = $null
             rootExit = $null
             rootJobMember = $false
@@ -116,7 +119,7 @@ function Write-FailureReceipt {
             cleanupState = 'UNVERIFIED'
             ioDrained = $false
             pseudoConsoleClosed = $false
-            ioMode = 'CONPTY'
+            ioMode = $selectedIoMode
             inputClosed = $false
             reason = 'launch-failure'
             error = $Message
@@ -133,20 +136,33 @@ foreach ($key in @([Environment]::GetEnvironmentVariables([EnvironmentVariableTa
         [Environment]::SetEnvironmentVariable([string]$key, $null, [EnvironmentVariableTarget]::Process)
     }
 }
+$selectedSecurityContext = $null
+$selectedIoMode = $null
 try {
     $line = Read-BoundedUtf8Line -Stream $inputStream -MaximumBytes $MaxInitialBytes
     if ([string]::IsNullOrEmpty($line)) { throw 'Initial launch frame is missing' }
-    $launch = $line | ConvertFrom-Json -Depth 8
+    $document = [Text.Json.JsonDocument]::Parse($line)
+    try {
+        if ($document.RootElement.ValueKind -ne [Text.Json.JsonValueKind]::Object) { throw 'Initial launch frame schema is invalid' }
+        $actualProperties = @($document.RootElement.EnumerateObject() | ForEach-Object {
+            if ($_.Name -ceq 'securityContext' -and $_.Value.ValueKind -eq [Text.Json.JsonValueKind]::String -and $_.Value.GetString() -cin @('CURRENT_PROCESS', 'RESTRICTED_LOW')) { $selectedSecurityContext = $_.Value.GetString() }
+            if ($_.Name -ceq 'ioMode' -and $_.Value.ValueKind -eq [Text.Json.JsonValueKind]::String -and $_.Value.GetString() -cin @('CONPTY', 'RAW_PIPE')) { $selectedIoMode = $_.Value.GetString() }
+            $_.Name
+        })
+    } finally { $document.Dispose() }
     $expectedProperties = @(
         'helperPath', 'helperSha256', 'scriptPath', 'scriptSha256', 'nativeSourcePath', 'nativeSourceSha256',
-        'executablePath', 'executableSha256', 'args', 'cwd', 'env', 'cols', 'rows', 'timeoutMs', 'cleanupMs', 'ioMode'
+        'executablePath', 'executableSha256', 'args', 'cwd', 'env', 'cols', 'rows', 'timeoutMs', 'cleanupMs', 'ioMode', 'securityContext'
     )
-    $actualProperties = @($launch.PSObject.Properties.Name)
+    $uniqueProperties = [Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
     if ($actualProperties.Count -ne $expectedProperties.Count -or
-        @($actualProperties | Where-Object { $_ -cnotin $expectedProperties }).Count -ne 0) {
+        @($actualProperties | Where-Object { $_ -cnotin $expectedProperties -or -not $uniqueProperties.Add($_) }).Count -ne 0) {
         throw 'Initial launch frame schema is invalid'
     }
+    $launch = $line | ConvertFrom-Json -Depth 8
     if ($launch.ioMode -cnotin @('CONPTY', 'RAW_PIPE')) { throw 'Invalid I/O mode' }
+    if ($launch.securityContext -isnot [string] -or $launch.securityContext -cnotin @('CURRENT_PROCESS', 'RESTRICTED_LOW')) { throw 'Invalid security context' }
+    if ($launch.securityContext -ceq 'RESTRICTED_LOW' -and $launch.ioMode -cne 'RAW_PIPE') { throw 'RESTRICTED_LOW requires RAW_PIPE' }
 
     $helperPath = Get-CanonicalRegularFile -Value $launch.helperPath -Name 'helperPath'
     $scriptPath = Get-CanonicalRegularFile -Value $launch.scriptPath -Name 'scriptPath'
@@ -196,6 +212,7 @@ try {
     $nativeJson = ([ordered]@{
         executablePath = $executablePath
         ioMode = $launch.ioMode
+        securityContext = $launch.securityContext
         args = @($launch.args)
         cwd = $cwd
         env = $launch.env
@@ -204,11 +221,7 @@ try {
         timeoutMs = [int]$launch.timeoutMs
         cleanupMs = [int]$launch.cleanupMs
     } | ConvertTo-Json -Depth 6 -Compress)
-    $nativeLaunch = [Text.Json.JsonSerializer]::Deserialize(
-        $nativeJson,
-        [Munder.WindowsOwnedPty.LaunchRequest],
-        [Text.Json.JsonSerializerOptions]::new()
-    )
+    $nativeLaunch = [Munder.WindowsOwnedPty.LaunchRequest]::Parse($nativeJson)
     [Munder.WindowsOwnedPty.NativeHost]::Run($nativeLaunch, $inputStream, [Console]::OpenStandardOutput())
     $inputStream.Dispose()
 } catch {

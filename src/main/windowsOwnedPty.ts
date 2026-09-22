@@ -5,6 +5,7 @@ import { resolve } from 'node:path';
 import { StringDecoder } from 'node:string_decoder';
 
 export interface OwnedPtyLaunch {
+  securityContext: 'CURRENT_PROCESS' | 'RESTRICTED_LOW';
   ioMode?: 'CONPTY' | 'RAW_PIPE';
   helperPath: string;
   helperSha256: string;
@@ -25,6 +26,9 @@ export interface OwnedPtyLaunch {
 }
 
 export interface OwnedPtyReceipt {
+  securityContext: 'CURRENT_PROCESS' | 'RESTRICTED_LOW';
+  restrictedTokenVerified: boolean;
+  childTokenVerified: boolean;
   ioMode?: 'CONPTY' | 'RAW_PIPE';
   inputClosed?: boolean;
   rootPid: number | null;
@@ -79,8 +83,9 @@ const HELPER_ENV_KEYS: Readonly<Record<string, true>> = {
   PSMODULEANALYSISCACHEPATH: true
 };
 
-function failedReceipt(reason: OwnedPtyReceipt['reason'], error: string): OwnedPtyReceipt {
+function failedReceipt(reason: OwnedPtyReceipt['reason'], error: string, securityContext: OwnedPtyLaunch['securityContext']): OwnedPtyReceipt {
   return {
+    securityContext, restrictedTokenVerified: false, childTokenVerified: false,
     ioMode: 'CONPTY', inputClosed: false,
     rootPid: null,
     rootExit: null,
@@ -196,8 +201,14 @@ export function launchOwnedPty(
   stop(): void;
   completion: Promise<OwnedPtyReceipt>;
 } {
+  const required = ['securityContext', 'helperPath', 'helperSha256', 'scriptPath', 'scriptSha256', 'nativeSourcePath', 'nativeSourceSha256', 'executablePath', 'executableSha256', 'args', 'cwd', 'env', 'helperEnv', 'cols', 'rows', 'timeoutMs', 'cleanupMs'];
+  if (!input || typeof input !== 'object' || Array.isArray(input) || required.some(key => !Object.prototype.hasOwnProperty.call(input, key)) ||
+      Object.keys(input).some(key => !required.includes(key) && key !== 'ioMode')) throw new Error('Invalid launch schema');
+  const securityContext = input.securityContext;
+  if (securityContext !== 'CURRENT_PROCESS' && securityContext !== 'RESTRICTED_LOW') throw new Error('Invalid security context');
   const ioMode = input.ioMode ?? 'CONPTY';
   if (ioMode !== 'CONPTY' && ioMode !== 'RAW_PIPE') throw new Error('Invalid I/O mode');
+  if (securityContext === 'RESTRICTED_LOW' && ioMode !== 'RAW_PIPE') throw new Error('RESTRICTED_LOW requires RAW_PIPE');
   let inputClosed = false;
   let pendingReceipt: OwnedPtyReceipt | null = null;
   let startedPid: number | null = null;
@@ -238,7 +249,7 @@ export function launchOwnedPty(
 
   const fail = (reason: OwnedPtyReceipt['reason'], error: string): void => {
     if (settled || pendingReceipt) return;
-    const receipt = failedReceipt(reason, error);
+    const receipt = failedReceipt(reason, error, securityContext);
     receipt.ioMode = ioMode;
     receipt.rootPid = startedPid;
     pendingReceipt = receipt;
@@ -313,6 +324,11 @@ export function launchOwnedPty(
     if (frame.type === 'exit') {
       try {
         const receipt = validateReceipt(frame.receipt);
+        if (receipt.securityContext !== securityContext || typeof receipt.restrictedTokenVerified !== 'boolean' ||
+            typeof receipt.childTokenVerified !== 'boolean' ||
+            (securityContext === 'CURRENT_PROCESS' && (receipt.restrictedTokenVerified || receipt.childTokenVerified)) ||
+            (securityContext === 'RESTRICTED_LOW' && receipt.reason !== 'launch-failure' && receipt.reason !== 'helper-failure' &&
+              (!receipt.restrictedTokenVerified || !receipt.childTokenVerified))) throw new Error('Invalid security context receipt');
         if (receipt.ioMode !== ioMode || typeof receipt.inputClosed !== 'boolean'
           || (ioMode === 'RAW_PIPE' && receipt.pseudoConsoleClosed)) throw new Error('invalid I/O mode receipt');
         pendingReceipt = receipt;
@@ -361,7 +377,7 @@ export function launchOwnedPty(
 
   const launch = {
     helperPath, helperSha256, scriptPath, scriptSha256, nativeSourcePath, nativeSourceSha256,
-    executablePath, executableSha256, args, cwd, env, cols, rows, timeoutMs, cleanupMs, ioMode
+    executablePath, executableSha256, args, cwd, env, cols, rows, timeoutMs, cleanupMs, ioMode, securityContext
   };
   const initial = `${JSON.stringify(launch)}\n`;
   if (Buffer.byteLength(initial) > MAX_INITIAL_BYTES) throw new Error('initial launch frame exceeds bounded protocol size');
@@ -375,7 +391,7 @@ export function launchOwnedPty(
       stdio: ['pipe', 'pipe', 'pipe']
     });
   } catch (error) {
-    const receipt = failedReceipt('launch-failure', `helper launch failed: ${error instanceof Error ? error.message : String(error)}`);
+    const receipt = failedReceipt('launch-failure', `helper launch failed: ${error instanceof Error ? error.message : String(error)}`, securityContext);
     receipt.ioMode = ioMode;
     queueMicrotask(() => finish(receipt));
     return {
@@ -419,7 +435,7 @@ export function launchOwnedPty(
   });
   child.on('error', (error) => {
     queueMicrotask(() => {
-      if (!settled) finish(failedReceipt('launch-failure', `helper launch failed: ${error.message}`));
+      if (!settled) finish({ ...failedReceipt('launch-failure', `helper launch failed: ${error.message}`, securityContext), ioMode });
     });
   });
   child.on('close', (code, signal) => {
@@ -430,8 +446,8 @@ export function launchOwnedPty(
         return;
       }
       const detail = stderrText.trim();
-      finish(failedReceipt(started ? 'helper-failure' : 'launch-failure',
-        `helper exited without a final receipt (code=${String(code)}, signal=${String(signal)})${detail ? `: ${detail}` : ''}`));
+      finish({ ...failedReceipt(started ? 'helper-failure' : 'launch-failure',
+        `helper exited without a final receipt (code=${String(code)}, signal=${String(signal)})${detail ? `: ${detail}` : ''}`, securityContext), ioMode, rootPid: startedPid });
     });
   });
   child.stdin.write(initial, 'utf8', (error) => {

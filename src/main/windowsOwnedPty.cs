@@ -13,6 +13,23 @@ namespace Munder.WindowsOwnedPty
 {
     public sealed class LaunchRequest
     {
+        public string securityContext { get; set; }
+        public static LaunchRequest Parse(string json)
+        {
+            using (JsonDocument document = JsonDocument.Parse(json))
+            {
+                var expected = new HashSet<string>(new[] { "executablePath", "args", "cwd", "env", "cols", "rows", "timeoutMs", "cleanupMs", "ioMode", "securityContext" }, StringComparer.Ordinal);
+                if (document.RootElement.ValueKind != JsonValueKind.Object) throw new ArgumentException("Invalid native launch schema");
+                foreach (JsonProperty property in document.RootElement.EnumerateObject())
+                    if (!expected.Remove(property.Name)) throw new ArgumentException("Invalid native launch schema");
+                if (expected.Count != 0) throw new ArgumentException("Invalid native launch schema");
+                LaunchRequest result = JsonSerializer.Deserialize<LaunchRequest>(json);
+                if (result.securityContext != "CURRENT_PROCESS" && result.securityContext != "RESTRICTED_LOW") throw new ArgumentException("Invalid security context");
+                if (result.ioMode != "CONPTY" && result.ioMode != "RAW_PIPE") throw new ArgumentException("Invalid I/O mode");
+                if (result.securityContext == "RESTRICTED_LOW" && result.ioMode != "RAW_PIPE") throw new ArgumentException("RESTRICTED_LOW requires RAW_PIPE");
+                return result;
+            }
+        }
         public string executablePath { get; set; }
         public string[] args { get; set; }
         public string cwd { get; set; }
@@ -21,11 +38,14 @@ namespace Munder.WindowsOwnedPty
         public int rows { get; set; }
         public int timeoutMs { get; set; }
         public int cleanupMs { get; set; }
-        public string ioMode { get; set; } = "CONPTY";
+        public string ioMode { get; set; }
     }
 
     public sealed class ExitReceipt
     {
+        public string securityContext { get; set; }
+        public bool restrictedTokenVerified { get; set; }
+        public bool childTokenVerified { get; set; }
         public int? rootPid { get; set; }
         public int? rootExit { get; set; }
         public bool rootJobMember { get; set; }
@@ -310,6 +330,85 @@ namespace Munder.WindowsOwnedPty
         [return: MarshalAs(UnmanagedType.Bool)]
         static extern bool CloseHandle(IntPtr handle);
 
+        [StructLayout(LayoutKind.Sequential)]
+        struct SidAttributes { public IntPtr sid; public uint attributes; }
+        [DllImport("kernel32.dll")] static extern IntPtr GetCurrentProcess();
+        [DllImport("kernel32.dll")] static extern IntPtr LocalFree(IntPtr value);
+        [DllImport("advapi32.dll", SetLastError = true)] static extern bool OpenProcessToken(IntPtr process, uint access, out IntPtr token);
+        [DllImport("advapi32.dll", SetLastError = true)] static extern bool GetTokenInformation(IntPtr token, int kind, IntPtr value, int size, out int returned);
+        [DllImport("advapi32.dll", SetLastError = true)] static extern bool SetTokenInformation(IntPtr token, int kind, IntPtr value, int size);
+        [DllImport("advapi32.dll", SetLastError = true)] static extern bool CreateRestrictedToken(IntPtr token, uint flags, uint disable, IntPtr sids, uint delete, IntPtr privileges, uint restrict, IntPtr restricting, out IntPtr result);
+        [DllImport("advapi32.dll", CharSet = CharSet.Unicode, SetLastError = true)] static extern bool ConvertStringSidToSidW(string text, out IntPtr sid);
+        [DllImport("advapi32.dll", CharSet = CharSet.Unicode, SetLastError = true)] static extern bool ConvertSidToStringSidW(IntPtr sid, out IntPtr text);
+        [DllImport("advapi32.dll")] static extern uint GetLengthSid(IntPtr sid);
+        [DllImport("advapi32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+        static extern bool CreateProcessAsUserW(IntPtr token, string application, [In, Out] StringBuilder commandLine,
+            IntPtr processAttributes, IntPtr threadAttributes, bool inheritHandles, uint creationFlags,
+            IntPtr environment, string currentDirectory, ref StartupInfoEx startup, out ProcessInformation process);
+
+        static IntPtr TokenInfo(IntPtr token, int kind)
+        {
+            int size;
+            bool sized = GetTokenInformation(token, kind, IntPtr.Zero, 0, out size);
+            if (sized || Marshal.GetLastWin32Error() != ERROR_INSUFFICIENT_BUFFER || size <= 0 || size > 1048576)
+                throw new InvalidOperationException("Invalid token information size");
+            IntPtr value = Marshal.AllocHGlobal(size);
+            try { Check(GetTokenInformation(token, kind, value, size, out size), "GetTokenInformation"); return value; }
+            catch { Marshal.FreeHGlobal(value); throw; }
+        }
+        static string TokenSid(IntPtr token, int kind)
+        {
+            IntPtr value = TokenInfo(token, kind), text = IntPtr.Zero;
+            try { Check(ConvertSidToStringSidW(Marshal.ReadIntPtr(value), out text), "ConvertSidToStringSidW"); return Marshal.PtrToStringUni(text); }
+            finally { if (text != IntPtr.Zero) LocalFree(text); Marshal.FreeHGlobal(value); }
+        }
+        static int TokenInteger(IntPtr token, int kind)
+        {
+            IntPtr value = TokenInfo(token, kind);
+            try { return Marshal.ReadInt32(value); } finally { Marshal.FreeHGlobal(value); }
+        }
+        static void VerifyLowToken(IntPtr token, string user)
+        {
+            if (TokenSid(token, 1) != user || TokenSid(token, 25) != "S-1-16-4096" || TokenInteger(token, 8) != 1 ||
+                (TokenInteger(token, 27) & 1) != 1 || TokenInteger(token, 11) != 0)
+                throw new InvalidOperationException("Restricted token identity, MIC or restricting SID invariant failed");
+            IntPtr privileges = TokenInfo(token, 3);
+            try
+            {
+                int count = Marshal.ReadInt32(privileges);
+                if (count < 0 || count > 1) throw new InvalidOperationException("Restricted token privilege count failed");
+                if (count == 1 && (Marshal.ReadInt32(privileges, 4) != 23 || Marshal.ReadInt32(privileges, 8) != 0))
+                    throw new InvalidOperationException("Restricted token privilege LUID failed");
+            }
+            finally { Marshal.FreeHGlobal(privileges); }
+        }
+        static IntPtr CreateLowToken(out string user)
+        {
+            IntPtr current = IntPtr.Zero, restricted = IntPtr.Zero, sid = IntPtr.Zero, label = IntPtr.Zero;
+            try
+            {
+                // TOKEN_ASSIGN_PRIMARY | TOKEN_DUPLICATE | TOKEN_QUERY | TOKEN_ADJUST_DEFAULT.
+                Check(OpenProcessToken(GetCurrentProcess(), 0x8B, out current), "OpenProcessToken current");
+                if (TokenInteger(current, 8) != 1 || TokenSid(current, 25) != "S-1-16-8192")
+                    throw new InvalidOperationException("RESTRICTED_LOW requires current primary Medium token");
+                user = TokenSid(current, 1);
+                // DISABLE_MAX_PRIVILEGE; no disabled SIDs, deleted privileges or restricting SIDs.
+                Check(CreateRestrictedToken(current, 1, 0, IntPtr.Zero, 0, IntPtr.Zero, 0, IntPtr.Zero, out restricted), "CreateRestrictedToken");
+                Check(ConvertStringSidToSidW("S-1-16-4096", out sid), "ConvertStringSidToSidW Low");
+                label = Marshal.AllocHGlobal(Marshal.SizeOf(typeof(SidAttributes)));
+                Marshal.StructureToPtr(new SidAttributes { sid = sid, attributes = 0x20 }, label, false);
+                Check(SetTokenInformation(restricted, 25, label, Marshal.SizeOf(typeof(SidAttributes)) + checked((int)GetLengthSid(sid))), "SetTokenInformation Low");
+                VerifyLowToken(restricted, user);
+                IntPtr result = restricted; restricted = IntPtr.Zero; return result;
+            }
+            finally
+            {
+                if (label != IntPtr.Zero) Marshal.FreeHGlobal(label);
+                if (sid != IntPtr.Zero) LocalFree(sid);
+                CloseOwned(ref restricted); CloseOwned(ref current);
+            }
+        }
+
         static void Check(bool value, string stage)
         {
             if (!value) throw new Win32Exception(Marshal.GetLastWin32Error(), stage);
@@ -537,6 +636,10 @@ namespace Munder.WindowsOwnedPty
         {
             ProtocolWriter protocol = new ProtocolWriter(protocolOutput);
             ExitReceipt receipt = new ExitReceipt();
+            receipt.securityContext = launch == null ? null : launch.securityContext;
+            if (launch != null) receipt.ioMode = launch.ioMode;
+            IntPtr restrictedToken = IntPtr.Zero;
+            string restrictedUser = null;
             IntPtr job = IntPtr.Zero, inputRead = IntPtr.Zero, inputWrite = IntPtr.Zero;
             IntPtr outputRead = IntPtr.Zero, outputWrite = IntPtr.Zero, pseudoConsole = IntPtr.Zero;
             IntPtr attributes = IntPtr.Zero, jobValue = IntPtr.Zero, environment = IntPtr.Zero, inheritedHandles = IntPtr.Zero;
@@ -553,6 +656,13 @@ namespace Munder.WindowsOwnedPty
                     launch.timeoutMs < 100 || launch.timeoutMs > 86400000 || launch.cleanupMs < 100 || launch.cleanupMs > 60000)
                     throw new ArgumentException("Invalid native launch request");
                 if (launch.ioMode != "CONPTY" && launch.ioMode != "RAW_PIPE") throw new ArgumentException("Invalid I/O mode");
+                if (launch.securityContext != "CURRENT_PROCESS" && launch.securityContext != "RESTRICTED_LOW") throw new ArgumentException("Invalid security context");
+                if (launch.securityContext == "RESTRICTED_LOW" && launch.ioMode != "RAW_PIPE") throw new ArgumentException("RESTRICTED_LOW requires RAW_PIPE");
+                if (launch.securityContext == "RESTRICTED_LOW")
+                {
+                    restrictedToken = CreateLowToken(out restrictedUser);
+                    receipt.restrictedTokenVerified = true;
+                }
                 receipt.ioMode = launch.ioMode;
                 string commandLine = BuildCommandLine(launch);
                 environment = BuildEnvironment(launch.env);
@@ -606,9 +716,14 @@ namespace Munder.WindowsOwnedPty
                         inheritedHandles, new IntPtr(IntPtr.Size * 2), IntPtr.Zero, IntPtr.Zero), "UpdateProcThreadAttribute HANDLE_LIST");
                 }
                 StringBuilder mutableCommandLine = new StringBuilder(commandLine);
-                Check(CreateProcessW(launch.executablePath, mutableCommandLine, IntPtr.Zero, IntPtr.Zero, raw,
-                    EXTENDED_STARTUPINFO_PRESENT | CREATE_UNICODE_ENVIRONMENT, environment, launch.cwd,
-                    ref startup, out process), "CreateProcessW");
+                if (restrictedToken != IntPtr.Zero)
+                    Check(CreateProcessAsUserW(restrictedToken, launch.executablePath, mutableCommandLine, IntPtr.Zero, IntPtr.Zero, raw,
+                        EXTENDED_STARTUPINFO_PRESENT | CREATE_UNICODE_ENVIRONMENT, environment, launch.cwd,
+                        ref startup, out process), "CreateProcessAsUserW");
+                else
+                    Check(CreateProcessW(launch.executablePath, mutableCommandLine, IntPtr.Zero, IntPtr.Zero, raw,
+                        EXTENDED_STARTUPINFO_PRESENT | CREATE_UNICODE_ENVIRONMENT, environment, launch.cwd,
+                        ref startup, out process), "CreateProcessW");
                 processCreated = true;
                 CloseOwned(ref inputRead);
                 CloseOwned(ref outputWrite);
@@ -619,6 +734,17 @@ namespace Munder.WindowsOwnedPty
                 Check(IsProcessInJob(process.hProcess, job, out member), "IsProcessInJob");
                 receipt.rootJobMember = member;
                 if (!member) throw new InvalidOperationException("Root process is not a creation-time Job member");
+                if (restrictedToken != IntPtr.Zero)
+                {
+                    IntPtr childToken = IntPtr.Zero;
+                    try
+                    {
+                        Check(OpenProcessToken(process.hProcess, 8, out childToken), "OpenProcessToken child");
+                        VerifyLowToken(childToken, restrictedUser);
+                        receipt.childTokenVerified = true;
+                    }
+                    finally { CloseOwned(ref childToken); }
+                }
 
                 drain = new OutputDrain(outputRead, protocol);
                 drain.Start();
@@ -734,6 +860,7 @@ namespace Munder.WindowsOwnedPty
                 CloseOwned(ref outputWrite);
                 CloseOwned(ref process.hThread);
                 CloseOwned(ref process.hProcess);
+                CloseOwned(ref restrictedToken);
                 if (attributesInitialized) DeleteProcThreadAttributeList(attributes);
                 if (attributes != IntPtr.Zero) Marshal.FreeHGlobal(attributes);
                 if (jobValue != IntPtr.Zero) Marshal.FreeHGlobal(jobValue);
