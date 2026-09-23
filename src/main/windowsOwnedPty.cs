@@ -183,16 +183,18 @@ namespace Munder.WindowsOwnedPty
         {
             readonly IntPtr handle;
             readonly ProtocolWriter protocol;
+            readonly string stream;
             readonly ManualResetEventSlim readerThreadReady = new ManualResetEventSlim(false);
             IntPtr readerThread;
             int cancelAttempts;
             int error;
             Task task;
 
-            public OutputDrain(IntPtr value, ProtocolWriter writer)
+            public OutputDrain(IntPtr value, ProtocolWriter writer, string streamName)
             {
                 handle = value;
                 protocol = writer;
+                stream = streamName;
             }
 
             public bool Completed { get { return task != null && task.IsCompleted; } }
@@ -222,13 +224,15 @@ namespace Munder.WindowsOwnedPty
                         return;
                     }
                     if (read == 0) return;
-                    protocol.Send(new { type = "data", data = Convert.ToBase64String(buffer, 0, checked((int)read)) });
+                    protocol.Send(new { type = "data", stream = stream, data = Convert.ToBase64String(buffer, 0, checked((int)read)) });
                 }
             }
 
             public bool Wait(int milliseconds)
             {
-                return task != null && task.Wait(milliseconds);
+                if (task == null) return false;
+                try { return task.Wait(milliseconds); }
+                catch (AggregateException) { Interlocked.CompareExchange(ref error, -1, 0); return task.IsCompleted; }
             }
 
             public bool StopReader(int milliseconds)
@@ -243,7 +247,7 @@ namespace Munder.WindowsOwnedPty
                         if (value != ERROR_OPERATION_ABORTED) error = value;
                     }
                 }
-                return task.Wait(milliseconds);
+                return Wait(milliseconds);
             }
 
             public void CloseReaderThread()
@@ -542,7 +546,7 @@ namespace Munder.WindowsOwnedPty
             return false;
         }
 
-        static void ProcessControls(ControlState control, IntPtr job, IntPtr inputWrite, IntPtr pseudoConsole, bool raw)
+        static void ProcessControls(ControlState control, IntPtr job, IntPtr inputWrite, IntPtr pseudoConsole, bool raw, ProtocolWriter protocol)
         {
             try
             {
@@ -578,6 +582,7 @@ namespace Munder.WindowsOwnedPty
                         Check(CloseHandle(control.inputWrite), "Close input");
                         control.inputWrite = IntPtr.Zero;
                         control.inputClosed = true;
+                        protocol.Send(new { type = "input-closed" });
                         continue;
                     }
                     if (type == "write" || type == "input")
@@ -589,6 +594,7 @@ namespace Munder.WindowsOwnedPty
                         uint written;
                         if (!WriteFile(inputWrite, data, (uint)data.Length, out written, IntPtr.Zero) || written != data.Length)
                             throw new Win32Exception(Marshal.GetLastWin32Error(), "WriteFile");
+                        if (raw) protocol.Send(new { type = "input-written", bytes = written });
                         continue;
                     }
                     throw new InvalidDataException("Unknown control frame");
@@ -642,10 +648,11 @@ namespace Munder.WindowsOwnedPty
             string restrictedUser = null;
             IntPtr job = IntPtr.Zero, inputRead = IntPtr.Zero, inputWrite = IntPtr.Zero;
             IntPtr outputRead = IntPtr.Zero, outputWrite = IntPtr.Zero, pseudoConsole = IntPtr.Zero;
+            IntPtr errorRead = IntPtr.Zero, errorWrite = IntPtr.Zero;
             IntPtr attributes = IntPtr.Zero, jobValue = IntPtr.Zero, environment = IntPtr.Zero, inheritedHandles = IntPtr.Zero;
             bool attributesInitialized = false;
             ProcessInformation process = new ProcessInformation();
-            OutputDrain drain = null;
+            OutputDrain drain = null, errorDrain = null;
             ControlState control = new ControlState();
             Task controlReader = null, controlProcessor = null;
             bool processCreated = false;
@@ -680,6 +687,11 @@ namespace Munder.WindowsOwnedPty
                 Check(SetHandleInformation(inputWrite, HANDLE_FLAG_INHERIT, 0), "SetHandleInformation input");
                 Check(SetHandleInformation(outputRead, HANDLE_FLAG_INHERIT, 0), "SetHandleInformation output");
                 bool raw = launch.ioMode == "RAW_PIPE";
+                if (raw)
+                {
+                    Check(CreatePipe(out errorRead, out errorWrite, ref security, 0), "CreatePipe stderr");
+                    Check(SetHandleInformation(errorRead, HANDLE_FLAG_INHERIT, 0), "SetHandleInformation stderr");
+                }
                 if (!raw) CheckHr(CreatePseudoConsole(new Coord((short)launch.cols, (short)launch.rows), inputRead, outputWrite, 0, out pseudoConsole), "CreatePseudoConsole");
 
                 IntPtr attributeSize = IntPtr.Zero;
@@ -705,15 +717,16 @@ namespace Munder.WindowsOwnedPty
                 {
                     startup.StartupInfo.hStdInput = inputRead;
                     startup.StartupInfo.hStdOutput = outputWrite;
-                    startup.StartupInfo.hStdError = outputWrite;
+                    startup.StartupInfo.hStdError = errorWrite;
                 }
                 if (raw)
                 {
-                    inheritedHandles = Marshal.AllocHGlobal(IntPtr.Size * 2);
+                    inheritedHandles = Marshal.AllocHGlobal(IntPtr.Size * 3);
                     Marshal.WriteIntPtr(inheritedHandles, inputRead);
                     Marshal.WriteIntPtr(inheritedHandles, IntPtr.Size, outputWrite);
+                    Marshal.WriteIntPtr(inheritedHandles, IntPtr.Size * 2, errorWrite);
                     Check(UpdateProcThreadAttribute(attributes, 0, new IntPtr(PROC_THREAD_ATTRIBUTE_HANDLE_LIST),
-                        inheritedHandles, new IntPtr(IntPtr.Size * 2), IntPtr.Zero, IntPtr.Zero), "UpdateProcThreadAttribute HANDLE_LIST");
+                        inheritedHandles, new IntPtr(IntPtr.Size * 3), IntPtr.Zero, IntPtr.Zero), "UpdateProcThreadAttribute HANDLE_LIST");
                 }
                 StringBuilder mutableCommandLine = new StringBuilder(commandLine);
                 if (restrictedToken != IntPtr.Zero)
@@ -727,6 +740,7 @@ namespace Munder.WindowsOwnedPty
                 processCreated = true;
                 CloseOwned(ref inputRead);
                 CloseOwned(ref outputWrite);
+                CloseOwned(ref errorWrite);
                 CloseOwned(ref process.hThread);
 
                 receipt.rootPid = checked((int)process.dwProcessId);
@@ -746,14 +760,15 @@ namespace Munder.WindowsOwnedPty
                     finally { CloseOwned(ref childToken); }
                 }
 
-                drain = new OutputDrain(outputRead, protocol);
-                drain.Start();
                 protocol.Send(new { type = "started", pid = receipt.rootPid.Value });
+                drain = new OutputDrain(outputRead, protocol, raw ? "stdout" : "conpty");
+                drain.Start();
+                if (raw) { errorDrain = new OutputDrain(errorRead, protocol, "stderr"); errorDrain.Start(); }
                 controlReader = Task.Factory.StartNew(() => ReadControls(controlInput, control), CancellationToken.None,
                     TaskCreationOptions.LongRunning, TaskScheduler.Default);
                 control.inputWrite = inputWrite;
                 inputWrite = IntPtr.Zero;
-                controlProcessor = Task.Factory.StartNew(() => ProcessControls(control, job, control.inputWrite, pseudoConsole, raw), CancellationToken.None,
+                controlProcessor = Task.Factory.StartNew(() => ProcessControls(control, job, control.inputWrite, pseudoConsole, raw, protocol), CancellationToken.None,
                     TaskCreationOptions.LongRunning, TaskScheduler.Default);
 
                 Stopwatch lifetime = Stopwatch.StartNew();
@@ -831,7 +846,7 @@ namespace Munder.WindowsOwnedPty
                     receipt.pseudoConsoleClosed = true;
                 }
                 // Job termination releases a blocked pipe writer before its owned handle is closed.
-                bool processorStopped = controlProcessor == null || controlProcessor.Wait(Math.Max(100, launch.cleanupMs));
+                bool processorStopped = controlProcessor == null || controlProcessor.Wait(Math.Max(100, launch == null ? 1000 : launch.cleanupMs));
                 if (processorStopped)
                 {
                     if (control.inputWrite != IntPtr.Zero)
@@ -841,6 +856,12 @@ namespace Munder.WindowsOwnedPty
                         control.inputClosed = closed;
                     }
                     receipt.inputClosed = receipt.ioMode == "RAW_PIPE" && control.inputClosed;
+                }
+                else
+                {
+                    receipt.reason = "helper-failure";
+                    receipt.cleanupState = "UNVERIFIED";
+                    receipt.error = "Control processor did not stop";
                 }
                 CloseOwned(ref inputWrite);
                 if (drain != null)
@@ -856,6 +877,16 @@ namespace Munder.WindowsOwnedPty
                     }
                 }
                 else CloseOwned(ref outputRead);
+                if (errorDrain != null)
+                {
+                    int drainWait = launch == null ? 1000 : Math.Max(100, launch.cleanupMs);
+                    bool completed = errorDrain.Wait(drainWait);
+                    if (!completed) completed = errorDrain.StopReader(Math.Min(drainWait, 1500));
+                    receipt.ioDrained = receipt.ioDrained && completed && !errorDrain.CancellationUsed && errorDrain.Error == 0;
+                    if (completed) { CloseOwned(ref errorRead); errorDrain.CloseReaderThread(); }
+                }
+                else { CloseOwned(ref errorRead); if (receipt.ioMode == "RAW_PIPE") receipt.ioDrained = false; }
+                CloseOwned(ref errorWrite);
                 CloseOwned(ref inputRead);
                 CloseOwned(ref outputWrite);
                 CloseOwned(ref process.hThread);

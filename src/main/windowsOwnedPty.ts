@@ -44,6 +44,10 @@ export interface OwnedPtyReceipt {
 
 interface OwnedPtyCallbacks {
   onData(data: string): void;
+  /** Exact child bytes before decoding; CONPTY is explicitly merged. */
+  onRawData?(stream: 'stdout' | 'stderr' | 'conpty', bytes: Buffer): void;
+  /** Native acknowledgment, not merely a queued control write. */
+  onInput?(kind: 'written' | 'closed', bytes: number): void;
   onStarted(pid: number): void;
   onExit(receipt: OwnedPtyReceipt): void;
 }
@@ -190,17 +194,19 @@ function validateReceipt(value: unknown): OwnedPtyReceipt {
   return receipt as unknown as OwnedPtyReceipt;
 }
 
-export function launchOwnedPty(
-  input: OwnedPtyLaunch,
-  callbacks: OwnedPtyCallbacks
-): {
+export interface OwnedPtyHandle {
   input(bytes: Uint8Array): void;
   closeInput(): void;
   write(data: string): void;
   resize(cols: number, rows: number): void;
   stop(): void;
   completion: Promise<OwnedPtyReceipt>;
-} {
+}
+
+export function launchOwnedPty(
+  input: OwnedPtyLaunch,
+  callbacks: OwnedPtyCallbacks
+): OwnedPtyHandle {
   const required = ['securityContext', 'helperPath', 'helperSha256', 'scriptPath', 'scriptSha256', 'nativeSourcePath', 'nativeSourceSha256', 'executablePath', 'executableSha256', 'args', 'cwd', 'env', 'helperEnv', 'cols', 'rows', 'timeoutMs', 'cleanupMs'];
   if (!input || typeof input !== 'object' || Array.isArray(input) || required.some(key => !Object.prototype.hasOwnProperty.call(input, key)) ||
       Object.keys(input).some(key => !required.includes(key) && key !== 'ioMode')) throw new Error('Invalid launch schema');
@@ -210,6 +216,8 @@ export function launchOwnedPty(
   if (ioMode !== 'CONPTY' && ioMode !== 'RAW_PIPE') throw new Error('Invalid I/O mode');
   if (securityContext === 'RESTRICTED_LOW' && ioMode !== 'RAW_PIPE') throw new Error('RESTRICTED_LOW requires RAW_PIPE');
   let inputClosed = false;
+  let acknowledgedInputClosed = false;
+  let inputBytesPending = 0;
   let pendingReceipt: OwnedPtyReceipt | null = null;
   let startedPid: number | null = null;
   let child: ChildProcessWithoutNullStreams | null = null;
@@ -225,6 +233,7 @@ export function launchOwnedPty(
   let failureTimer: NodeJS.Timeout | undefined;
   const pending: ControlFrame[] = [];
   const decoder = new StringDecoder('utf8');
+  const errorDecoder = new StringDecoder('utf8');
   let resolveCompletion!: (receipt: OwnedPtyReceipt) => void;
   const completion = new Promise<OwnedPtyReceipt>((resolvePromise) => { resolveCompletion = resolvePromise; });
 
@@ -234,9 +243,10 @@ export function launchOwnedPty(
     clearTimeout(startupTimer);
     clearTimeout(outerTimer);
     clearTimeout(failureTimer);
-    const trailing = decoder.end();
-    if (trailing) {
-      try { callbacks.onData(trailing); } catch { /* completion must remain single-shot */ }
+    for (const trailing of [decoder.end(), errorDecoder.end()]) {
+      if (trailing) {
+        try { callbacks.onData(trailing); } catch { /* completion must remain single-shot */ }
+      }
     }
     try { callbacks.onExit(receipt); } catch { /* callback errors do not alter ownership cleanup */ }
     resolveCompletion(receipt);
@@ -307,18 +317,38 @@ export function launchOwnedPty(
       return;
     }
     if (frame.type === 'data') {
-      if (typeof frame.data !== 'string' || frame.data.length > MAX_PROTOCOL_LINE || !/^[A-Za-z0-9+/]*={0,2}$/.test(frame.data)) {
+      if (!started || typeof frame.data !== 'string' || frame.data.length > MAX_PROTOCOL_LINE || !/^[A-Za-z0-9+/]*={0,2}$/.test(frame.data)
+        || (ioMode === 'RAW_PIPE' ? frame.stream !== 'stdout' && frame.stream !== 'stderr' : frame.stream !== 'conpty')) {
         fail('helper-failure', 'helper emitted an invalid data frame');
         return;
       }
       const bytes = Buffer.from(frame.data, 'base64');
       try {
-        const text = decoder.write(bytes);
+        if (bytes.toString('base64') !== frame.data) throw new Error('noncanonical data frame');
+        const stream = frame.stream as 'stdout' | 'stderr' | 'conpty';
+        callbacks.onRawData?.(stream, Buffer.from(bytes));
+        const text = (stream === 'stderr' ? errorDecoder : decoder).write(bytes);
         if (text) callbacks.onData(text);
       } catch (error) {
         send({ type: 'stop' });
         fail('helper-failure', `onData callback failed: ${error instanceof Error ? error.message : String(error)}`);
       }
+      return;
+    }
+    if (frame.type === 'input-written' || frame.type === 'input-closed') {
+      try {
+        if (!started || ioMode !== 'RAW_PIPE' || acknowledgedInputClosed) throw new Error('invalid input acknowledgment');
+        if (frame.type === 'input-written') {
+          if (!Number.isSafeInteger(frame.bytes) || Number(frame.bytes) <= 0 || Number(frame.bytes) > inputBytesPending)
+            throw new Error('invalid input byte acknowledgment');
+          inputBytesPending -= Number(frame.bytes);
+          callbacks.onInput?.('written', Number(frame.bytes));
+        } else {
+          if (!inputClosed || inputBytesPending !== 0) throw new Error('premature input closure');
+          acknowledgedInputClosed = true;
+          callbacks.onInput?.('closed', 0);
+        }
+      } catch { fail('helper-failure', 'invalid input acknowledgment'); }
       return;
     }
     if (frame.type === 'exit') {
@@ -331,6 +361,8 @@ export function launchOwnedPty(
               (!receipt.restrictedTokenVerified || !receipt.childTokenVerified))) throw new Error('Invalid security context receipt');
         if (receipt.ioMode !== ioMode || typeof receipt.inputClosed !== 'boolean'
           || (ioMode === 'RAW_PIPE' && receipt.pseudoConsoleClosed)) throw new Error('invalid I/O mode receipt');
+        if (receipt.rootPid !== startedPid || (receipt.reason === 'exit' && (!started || receipt.rootExit === null)))
+          throw new Error('invalid process identity receipt');
         pendingReceipt = receipt;
       } catch (error) {
         fail('helper-failure', error instanceof Error ? error.message : String(error));
@@ -464,6 +496,7 @@ export function launchOwnedPty(
       if (ioMode !== 'RAW_PIPE' || inputClosed || settled || pendingReceipt) throw new Error('Raw input unavailable');
       if (!(bytes instanceof Uint8Array) || !bytes.byteLength || bytes.byteLength > 65_536) throw new Error('Invalid raw input bounds');
       const buffer = Buffer.from(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+      inputBytesPending += buffer.length;
       for (let offset = 0; offset < buffer.length; offset += 24 * 1024)
         send({ type: 'input', data: buffer.subarray(offset, offset + 24 * 1024).toString('base64') });
     },
