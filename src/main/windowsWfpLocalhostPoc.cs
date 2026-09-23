@@ -161,7 +161,48 @@ public static class WindowsWfpLocalhostPoc
         }
         finally { Check(FwpmSessionDestroyEnumHandle0(engine, handle)); }
     }
-    static object Install(IntPtr engine, Guid sub, Guid key, Guid layer, bool permit, ushort port, IntPtr app)
+    // Representation evidence only: these offsets do not certify the native SDK ABI.
+    public static object FilterLayout()
+    {
+        Dictionary<string, int> offsets = new Dictionary<string, int>();
+        string[] names = { "filterKey", "displayData", "flags", "providerKey", "providerData", "layerKey", "subLayerKey", "weight", "numFilterConditions", "filterCondition", "action", "rawContext", "providerContext", "reserved", "filterId", "effectiveWeight" };
+        string[] fields = { "key", "display", "flags", "provider", "providerData", "layer", "sublayer", "weight", "count", "conditions", "action", "context", "context", "reserved", "id", "effectiveWeight" };
+        for (int i = 0; i < names.Length; i++) offsets.Add(names[i], Marshal.OffsetOf(typeof(Filter), fields[i]).ToInt32());
+        return new { sizeOf = new { Filter = Marshal.SizeOf(typeof(Filter)), Display = Marshal.SizeOf(typeof(Display)), Blob = Marshal.SizeOf(typeof(Blob)), Value = Marshal.SizeOf(typeof(Value)), Action = Marshal.SizeOf(typeof(Action)), Condition = Marshal.SizeOf(typeof(Condition)) }, offsetOf = offsets };
+    }
+    static void DiagnosticField(Dictionary<string, object> fields, List<string> mismatches, string name, object expected, object actual)
+    {
+        bool match = Object.Equals(expected, actual);
+        fields.Add(name, new { expected = expected, actual = actual, match = match });
+        if (!match) mismatches.Add(name);
+    }
+    // Pure managed helper: never dereferences any pointer or calls WFP.
+    public static Dictionary<string, object> FilterDiagnostic(Filter expected, Filter actual, ulong addedId)
+    {
+        Dictionary<string, object> fields = new Dictionary<string, object>(); List<string> mismatches = new List<string>();
+        DiagnosticField(fields, mismatches, "filterKey", expected.key.ToString("D"), actual.key.ToString("D"));
+        DiagnosticField(fields, mismatches, "layerKey", expected.layer.ToString("D"), actual.layer.ToString("D"));
+        DiagnosticField(fields, mismatches, "subLayerKey", expected.sublayer.ToString("D"), actual.sublayer.ToString("D"));
+        DiagnosticField(fields, mismatches, "flags", expected.flags, actual.flags);
+        DiagnosticField(fields, mismatches, "providerKey", expected.provider == IntPtr.Zero ? "null" : "non-null", actual.provider == IntPtr.Zero ? "null" : "non-null");
+        DiagnosticField(fields, mismatches, "providerData.size", expected.providerData.size, actual.providerData.size);
+        DiagnosticField(fields, mismatches, "filterId", addedId.ToString(System.Globalization.CultureInfo.InvariantCulture), actual.id.ToString(System.Globalization.CultureInfo.InvariantCulture));
+        DiagnosticField(fields, mismatches, "action.type", expected.action.type, actual.action.type);
+        DiagnosticField(fields, mismatches, "weight.type", expected.weight.type, actual.weight.type);
+        bool expectedApplicable = expected.weight.type == 1, actualApplicable = actual.weight.type == 1;
+        object expectedByte = expectedApplicable ? (object)expected.weight.u8 : null, actualByte = actualApplicable ? (object)actual.weight.u8 : null;
+        bool byteMatch = expectedApplicable == actualApplicable && Object.Equals(expectedByte, actualByte);
+        fields.Add("weight.uint8", new { expected = expectedByte, actual = actualByte, match = byteMatch, expectedApplicable = expectedApplicable, actualApplicable = actualApplicable });
+        if (!byteMatch) mismatches.Add("weight.uint8");
+        DiagnosticField(fields, mismatches, "numFilterConditions", expected.count, actual.count);
+        return new Dictionary<string, object> { { "fields", fields }, { "mismatches", mismatches }, { "status", mismatches.Count == 0 ? "MATCH" : "MISMATCH" } };
+    }
+    public static void RequireFilterDiagnostic(Dictionary<string, object> diagnostic)
+    {
+        List<string> mismatches = (List<string>)diagnostic["mismatches"];
+        Require(mismatches.Count == 0, "Filter query mismatch: " + String.Join(", ", mismatches.ToArray()));
+    }
+    static object Install(IntPtr engine, Guid sub, Guid key, Guid layer, bool permit, ushort port, IntPtr app, List<object> diagnostics)
     {
         string name = permit ? V4PermitName : layer == V4 ? V4BlockName : V6BlockName;
         string role = permit ? "v4-permit" : layer == V4 ? "v4-catch-all-block" : "v6-catch-all-block";
@@ -175,12 +216,15 @@ public static class WindowsWfpLocalhostPoc
             for (int i = 0; i < conditions.Length; i++) Marshal.StructureToPtr(conditions[i], IntPtr.Add(block, i * size), false);
             Filter wanted = new Filter { key = key, display = display.Value, layer = layer, sublayer = sub, weight = Number(1, permit ? 15U : 1U), count = (uint)conditions.Length, conditions = block, action = new Action { type = permit ? 0x1002U : 0x1001U } };
             ulong id;
+            Filter expectedFilter = wanted; // Preserve policy expectations across the native ref call.
             AssertDisplay(wanted.display, name);
             Check(FwpmFilterAdd0(engine, ref wanted, IntPtr.Zero, out id), "FwpmFilterAdd0", role, key); IntPtr queried = IntPtr.Zero;
             try
             {
                 Check(FwpmFilterGetByKey0(engine, ref key, out queried)); Filter got = (Filter)Marshal.PtrToStructure(queried, typeof(Filter));
-                Require(got.key == key && got.layer == layer && got.sublayer == sub && got.flags == 0 && got.provider == IntPtr.Zero && got.providerData.size == 0 && got.id == id && got.action.type == wanted.action.type && got.weight.type == 1 && got.weight.u8 == wanted.weight.u8 && got.count == conditions.Length, "Filter query mismatch");
+                Dictionary<string, object> diagnostic = FilterDiagnostic(expectedFilter, got, id);
+                Require(diagnostics.Count < 3, "Filter diagnostic count bound"); diagnostics.Add(diagnostic);
+                RequireFilterDiagnostic(diagnostic);
                 AssertDisplay(got.display, name);
                 List<object> evidence = new List<object>();
                 for (int i = 0; i < conditions.Length; i++)
@@ -290,7 +334,8 @@ public static class WindowsWfpLocalhostPoc
     }
     public static int Main(string[] args)
     {
-        Dictionary<string, object> receipt = new Dictionary<string, object>(); receipt["schema"] = "wfp-localhost-proof"; receipt["version"] = 1; receipt["DNS_SERVICE_DELEGATION_CONTAINMENT"] = "UNKNOWN"; receipt["classification"] = "UNKNOWN"; receipt["cleanup"] = "NOT_OPENED";
+        Dictionary<string, object> receipt = new Dictionary<string, object>(); receipt["schema"] = "wfp-localhost-proof"; receipt["version"] = 2; receipt["DNS_SERVICE_DELEGATION_CONTAINMENT"] = "UNKNOWN"; receipt["classification"] = "UNKNOWN"; receipt["cleanup"] = "NOT_OPENED";
+        receipt["filterLayout"] = FilterLayout();
         IntPtr engine = IntPtr.Zero, app = IntPtr.Zero; Guid sub = Guid.NewGuid(); Guid[] keys = { Guid.NewGuid(), Guid.NewGuid(), Guid.NewGuid() }; List<TcpListener> listeners = new List<TcpListener>(); UdpClient udp = null; bool installPhase = false, liveAttempted = false, elevationRequired = false;
         FileStream frozenProbe = null;
         bool elevated = new WindowsPrincipal(WindowsIdentity.GetCurrent()).IsInRole(WindowsBuiltInRole.Administrator);
@@ -322,6 +367,7 @@ public static class WindowsWfpLocalhostPoc
             else
             {
                 Session session = new Session { key = Guid.NewGuid(), flags = 1 }; receipt["objects"] = new { session = session.key, sublayer = sub, filters = keys };
+                List<object> diagnostics = new List<object>(); receipt["filterDiagnostics"] = diagnostics;
                 receipt["sessionQuery"] = new { status = "UNKNOWN" };
                 liveAttempted = true; installPhase = true; OpenSession(ref session, SessionName, "proof-session", out engine);
                 receipt["sessionQuery"] = QuerySession(engine, session.key, SessionName);
@@ -350,9 +396,9 @@ public static class WindowsWfpLocalhostPoc
                 udp = new UdpClient(new IPEndPoint(IPAddress.Loopback, 0)); Require(((IPEndPoint)udp.Client.LocalEndPoint).Port >= 1024, "UDP port bound");
                 ushort approved = (ushort)((IPEndPoint)listeners[0].LocalEndpoint).Port;
                 List<object> filters = new List<object>(); receipt["filters"] = filters;
-                filters.Add(Install(engine, sub, keys[0], V4, true, approved, app));
-                filters.Add(Install(engine, sub, keys[1], V4, false, approved, app));
-                filters.Add(Install(engine, sub, keys[2], V6, false, approved, app));
+                filters.Add(Install(engine, sub, keys[0], V4, true, approved, app, diagnostics));
+                filters.Add(Install(engine, sub, keys[1], V4, false, approved, app, diagnostics));
+                filters.Add(Install(engine, sub, keys[2], V6, false, approved, app, diagnostics));
                 ulong permitWeight = UInt64.Parse((string)filters[0].GetType().GetProperty("effectiveWeight").GetValue(filters[0], null));
                 ulong blockWeight = UInt64.Parse((string)filters[1].GetType().GetProperty("effectiveWeight").GetValue(filters[1], null));
                 Require(permitWeight > blockWeight, "Effective weight ordering mismatch");

@@ -46,13 +46,86 @@ function writeCommandFile(file, command) {
   return { path: file, encoding: commandFileEncoding, newline: commandFileNewline, bom: false, byteLength: reread.length, sha256 };
 }
 
+const filterOffsets = { filterKey: 0, displayData: 16, flags: 32, providerKey: 40, providerData: 48, layerKey: 64, subLayerKey: 80, weight: 96, numFilterConditions: 112, filterCondition: 120, action: 128, rawContext: 152, providerContext: 152, reserved: 168, filterId: 176, effectiveWeight: 184 };
+const filterLayout = { sizeOf: { Filter: 200, Display: 16, Blob: 16, Value: 16, Action: 20, Condition: 40 }, offsetOf: filterOffsets };
+const diagnosticFields = ['filterKey', 'layerKey', 'subLayerKey', 'flags', 'providerKey', 'providerData.size', 'filterId', 'action.type', 'weight.type', 'weight.uint8', 'numFilterConditions'];
+function exactKeys(value, keys) {
+  assert.ok(value && typeof value === 'object' && !Array.isArray(value));
+  assert.deepEqual(Object.keys(value).sort(), [...keys].sort());
+}
+function validateFilterDiagnostic(d, objects, index) {
+  exactKeys(d, ['fields', 'mismatches', 'status']);
+  exactKeys(d.fields, diagnosticFields);
+  const expected = {
+    filterKey: objects.filters[index], layerKey: index === 2 ? '4a72393b-319f-44bc-84c3-ba54dcb3b6b4' : 'c38d57d1-05a7-4c33-904f-7fbceee60e82', subLayerKey: objects.sublayer,
+    flags: 0, providerKey: 'null', 'providerData.size': 0, 'action.type': index === 0 ? 0x1002 : 0x1001,
+    'weight.type': 1, 'weight.uint8': index === 0 ? 15 : 1, numFilterConditions: index === 0 ? 4 : 1,
+  };
+  const mismatches = [];
+  for (const name of diagnosticFields) {
+    const f = d.fields[name], byte = name === 'weight.uint8';
+    exactKeys(f, byte ? ['expected', 'actual', 'match', 'expectedApplicable', 'actualApplicable'] : ['expected', 'actual', 'match']);
+    if (name !== 'filterId') assert.equal(f.expected, expected[name], `${name}: policy expectation`);
+    for (const value of [f.expected, f.actual]) {
+      if (['filterKey', 'layerKey', 'subLayerKey'].includes(name)) assert.match(value, /^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$/);
+      else if (name === 'providerKey') assert.ok(['null', 'non-null'].includes(value));
+      else if (name === 'filterId') {
+        assert.equal(typeof value, 'string'); assert.match(value, /^(0|[1-9][0-9]{0,19})$/); assert.ok(BigInt(value) <= 0xFFFFFFFFFFFFFFFFn);
+      } else if (!(byte && value === null)) assert.ok(Number.isInteger(value) && value >= 0 && value <= (byte ? 255 : 0xFFFFFFFF));
+    }
+    if (name === 'filterId') assert.notEqual(f.expected, '0', 'add-returned filter ID required');
+    if (byte) {
+      assert.equal(f.expectedApplicable, d.fields['weight.type'].expected === 1);
+      assert.equal(f.actualApplicable, d.fields['weight.type'].actual === 1);
+      assert.equal(f.expected === null, !f.expectedApplicable);
+      assert.equal(f.actual === null, !f.actualApplicable);
+    }
+    const match = f.expected === f.actual && (!byte || f.expectedApplicable === f.actualApplicable);
+    assert.equal(f.match, match, `${name}: recomputed match`);
+    if (!match) mismatches.push(name);
+  }
+  assert.deepEqual(d.mismatches, mismatches, 'exact ordered mismatch fields');
+  assert.equal(d.status, mismatches.length ? 'MISMATCH' : 'MATCH');
+  return mismatches;
+}
+
 function receipt(text) {
   assert.ok(Buffer.byteLength(text) <= 262144, 'receipt size bound');
   const r = JSON.parse(text.replace(/^\uFEFF/, ''));
   assert.equal(r.schema, 'wfp-localhost-proof');
-  assert.equal(r.version, 1);
+  assert.ok(r.version === 1 || r.version === 2, 'supported receipt version');
   assert.equal(r.DNS_SERVICE_DELEGATION_CONTAINMENT, 'UNKNOWN');
   assert.ok(classifications.has(r.classification));
+  // Version 1 is historical only; version 2 requires explicit representation evidence.
+  if (r.version === 1) {
+    assert.equal(r.filterLayout, undefined); assert.equal(r.filterDiagnostics, undefined);
+  } else {
+    assert.deepEqual(r.filterLayout, filterLayout);
+    if (r.objects !== undefined || r.filters !== undefined || r.queryBeforeTraffic !== undefined || r.matrix !== undefined) assert.ok(Array.isArray(r.filterDiagnostics), 'v2 live evidence requires diagnostics');
+  }
+  if (r.filterDiagnostics !== undefined) {
+    assert.ok(r.filterLayout, 'layout accompanies diagnostics');
+    assert.ok(Array.isArray(r.filterDiagnostics) && r.filterDiagnostics.length <= 3);
+    assert.ok(Array.isArray(r.objects?.filters) && r.objects.filters.length === 3);
+    let failed = false;
+    for (const [index, d] of r.filterDiagnostics.entries()) {
+      assert.equal(failed, false, 'no installation after mismatch');
+      failed = validateFilterDiagnostic(d, r.objects, index).length > 0;
+      if (!failed && r.filters?.[index]) {
+        const f = r.filters[index];
+        for (const [field, key] of Object.entries({ filterKey: 'key', layerKey: 'layer', subLayerKey: 'sublayer', filterId: 'id', 'action.type': 'action', 'weight.uint8': 'weight' })) assert.equal(d.fields[field].actual, f[key]);
+        assert.equal(d.fields.numFilterConditions.actual, f.conditions.length);
+      }
+    }
+    if (failed) {
+      assert.ok(['UNKNOWN', 'PROOF_OBJECTS_REMAIN'].includes(r.classification), 'mismatch cannot assert success');
+      assert.equal(r.queryBeforeTraffic, undefined);
+      assert.equal(r.matrix, undefined);
+      assert.equal(r.filters.length, r.filterDiagnostics.length - 1);
+    }
+    if (r.classification === 'EXACT_APP_LOCALHOST_MATRIX_PROVEN') assert.equal(r.filterDiagnostics.length, 3);
+    if (r.classification === 'STATIC_ONLY_NO_WFP_NO_NETWORK') assert.fail('static receipt cannot contain query evidence');
+  } else if (r.filterLayout !== undefined && r.classification === 'EXACT_APP_LOCALHOST_MATRIX_PROVEN') assert.fail('new successful receipts require query evidence');
   // Historical receipts may predate stage evidence; validate it strictly when present.
   if (r.wfpFailure !== undefined) {
     const f = r.wfpFailure;
@@ -213,7 +286,7 @@ function staticChecks() {
     'Condition[] conditions = permit ? new Condition[] { C(App, new Value { type = 12, pointer = app }), C(Protocol, Number(1, 6)), C(Address, Number(3, 0x7f000001)), C(Port, Number(2, port)) } : new Condition[] { C(App, new Value { type = 12, pointer = app }) };',
     'weight = Number(1, permit ? 15U : 1U)', 'action = new Action { type = permit ? 0x1002U : 0x1001U }',
     'Sublayer layer = new Sublayer { key = sub, weight = 0x100 };',
-    'Install(engine, sub, keys[0], V4, true, approved, app)', 'Install(engine, sub, keys[1], V4, false, approved, app)', 'Install(engine, sub, keys[2], V6, false, approved, app)',
+    'Install(engine, sub, keys[0], V4, true, approved, app, diagnostics)', 'Install(engine, sub, keys[1], V4, false, approved, app, diagnostics)', 'Install(engine, sub, keys[2], V6, false, approved, app, diagnostics)',
     'string[] labels = { "tcp-approved", "tcp-disallowed", "tcp-ipv6", "tcp-same-host" };',
   ]) assert.ok(controller.includes(fragment), fragment);
   assert.equal((controller.match(/Session session = new Session \{ key = Guid.NewGuid\(\), flags = 1 \}/g) || []).length, 2);
@@ -246,6 +319,56 @@ function staticChecks() {
   assert.throws(() => receipt(JSON.stringify({ ...remaining, classification: denied.classification })));
   assert.throws(() => receipt(JSON.stringify({ ...remaining, WFP_PROOF_OBJECTS_REMAINING: 0 })));
   const objects = { session: '11111111-1111-1111-1111-111111111111', sublayer: '22222222-2222-2222-2222-222222222222', filters: ['33333333-3333-3333-3333-333333333333', '44444444-4444-4444-4444-444444444444', '55555555-5555-5555-5555-555555555555'] };
+  const diagnostic = () => {
+    const values = [objects.filters[0], 'c38d57d1-05a7-4c33-904f-7fbceee60e82', objects.sublayer, 0, 'null', 0, '18446744073709551615', 0x1002, 1, 15, 4];
+    const fields = Object.fromEntries(diagnosticFields.map((name, i) => [name, { expected: values[i], actual: values[i], match: true }]));
+    Object.assign(fields['weight.uint8'], { expectedApplicable: true, actualApplicable: true });
+    return { fields, mismatches: [], status: 'MATCH' };
+  };
+  const diagnosticReceipt = d => ({ schema: 'wfp-localhost-proof', version: 2, DNS_SERVICE_DELEGATION_CONTAINMENT: 'UNKNOWN', classification: 'UNKNOWN', cleanup: 'NOT_OPENED', objects, filters: [], filterLayout, filterDiagnostics: [d] });
+  assert.deepEqual(validateFilterDiagnostic(diagnostic(), objects, 0), []);
+  const alternatives = ['66666666-6666-6666-6666-666666666666', '66666666-6666-6666-6666-666666666666', '66666666-6666-6666-6666-666666666666', 1, 'non-null', 1, '1', 0x1001, 2, 14, 3];
+  for (const [i, name] of diagnosticFields.entries()) {
+    const d = diagnostic(); d.fields[name].actual = alternatives[i]; d.fields[name].match = false;
+    d.mismatches = [name]; d.status = 'MISMATCH';
+    if (name === 'weight.type') {
+      Object.assign(d.fields['weight.uint8'], { actual: null, actualApplicable: false, match: false }); d.mismatches.push('weight.uint8');
+    }
+    assert.deepEqual(validateFilterDiagnostic(d, objects, 0), d.mismatches);
+    assert.deepEqual(receipt(JSON.stringify(diagnosticReceipt(d))).filterDiagnostics[0], d);
+    const forged = structuredClone(d); forged.fields[name].match = true;
+    assert.throws(() => receipt(JSON.stringify(diagnosticReceipt(forged))));
+    assert.throws(() => receipt(JSON.stringify({ ...diagnosticReceipt(d), classification: 'EXACT_APP_LOCALHOST_MATRIX_PROVEN' })));
+    const missing = diagnostic(); delete missing.fields[name];
+    assert.throws(() => validateFilterDiagnostic(missing, objects, 0));
+  }
+  const multiple = diagnostic();
+  for (const name of ['flags', 'providerData.size', 'numFilterConditions']) Object.assign(multiple.fields[name], { actual: 99, match: false });
+  multiple.mismatches = ['flags', 'providerData.size', 'numFilterConditions']; multiple.status = 'MISMATCH';
+  assert.deepEqual(receipt(JSON.stringify(diagnosticReceipt(multiple))).filterDiagnostics[0].mismatches, multiple.mismatches);
+  for (const mutate of [
+    d => { d.mismatches.pop(); }, d => { d.mismatches.reverse(); }, d => { d.status = 'MATCH'; },
+    d => { d.fields.flags.expected = 99; d.fields.flags.match = true; }, d => { d.fields.providerKey.actual = '0x1234'; },
+    d => { d.fields.filterId.actual = '18446744073709551616'; }, d => { d.fields.flags.actual = -1; },
+    d => { d.fields['weight.uint8'].actualApplicable = false; }, d => { d.fields.flags.pointer = '0x1234'; },
+    d => { d.fields.extra = {}; }, d => { d.extra = true; },
+  ]) { const d = structuredClone(multiple); mutate(d); assert.throws(() => receipt(JSON.stringify(diagnosticReceipt(d)))); }
+  assert.throws(() => receipt(JSON.stringify({ ...diagnosticReceipt(multiple), queryBeforeTraffic: true })));
+  assert.throws(() => receipt(JSON.stringify({ ...diagnosticReceipt(multiple), filterDiagnostics: [multiple, diagnostic()] })));
+  assert.throws(() => receipt(JSON.stringify({ ...diagnosticReceipt(multiple), filterDiagnostics: Array(4).fill(multiple) })));
+  assert.throws(() => receipt(JSON.stringify({ ...diagnosticReceipt(multiple), filterLayout: { ...filterLayout, offsetOf: { ...filterOffsets, filterId: 160 } } })));
+  assert.throws(() => receipt(JSON.stringify({ ...diagnosticReceipt(multiple), filterLayout: { ...filterLayout, pointer: '0x1234' } })));
+  for (const mutation of [{ filterLayout: undefined }, { filterDiagnostics: undefined }, { filterLayout: undefined, filterDiagnostics: undefined }, { version: 1 }, { version: 3 }]) assert.throws(() => receipt(JSON.stringify({ ...diagnosticReceipt(multiple), ...mutation })));
+  assert.ok(Buffer.byteLength(JSON.stringify({ ...diagnosticReceipt(diagnostic()), filterDiagnostics: Array(3).fill(diagnostic()) })) < 8192, 'bounded diagnostic payload');
+  for (const name of diagnosticFields) assert.ok(controller.includes(`"${name}"`));
+  for (const field of Object.keys(filterOffsets)) assert.ok(controller.includes(`"${field}"`));
+  assert.match(controller, /Marshal\.OffsetOf\(typeof\(Filter\), fields\[i\]\)/);
+  for (const type of Object.keys(filterLayout.sizeOf)) assert.ok(controller.includes(`${type} = Marshal.SizeOf(typeof(${type}))`));
+  assert.match(controller, /FilterDiagnostic\(expectedFilter, got, id\);\s*Require\(diagnostics.Count < 3[^\n]+diagnostics.Add\(diagnostic\);\s*RequireFilterDiagnostic\(diagnostic\);\s*AssertDisplay\(got.display, name\)/);
+  assert.match(controller, /Filter expectedFilter = wanted;[^\n]*\s*AssertDisplay\(wanted.display, name\);\s*Check\(FwpmFilterAdd0/);
+  assert.ok(controller.includes('Require(mismatches.Count == 0, "Filter query mismatch: " + String.Join(", ", mismatches.ToArray()))'));
+  assert.ok(controller.includes('receipt["filterDiagnostics"] = diagnostics;'));
+  for (const fragment of ['Require(actual.field == expected.field && actual.match == 0 && actual.value.type == expected.value.type', 'Require(Equal(Bytes(actual.value.pointer), Bytes(app))', 'Require(actual.value.u32 == expected.value.u32', 'finally { if (queried != IntPtr.Zero) FwpmFreeMemory0(ref queried); }', 'close = FwpmEngineClose0(engine); receipt["engineCloseCode"] = close;', 'Require(close == 0, "Dynamic engine close failed")', 'receipt["cleanup"] = Absence(sub, keys, out remaining)', 'if (remaining != 0) receipt["classification"] = "PROOF_OBJECTS_REMAIN"']) assert.ok(controller.includes(fragment), fragment);
   for (const [api, role, objectKey] of [
     ['FwpmEngineOpen0', 'proof-session', objects.session],
     ['FwpmSubLayerAdd0', 'proof-sublayer', objects.sublayer],
@@ -282,6 +405,10 @@ function staticChecks() {
   assert.equal((script.match(/\[IO.Directory\]::Delete\(/g) || []).length, 1);
   assert.ok(script.includes('if ($created -and $finalized) { [IO.Directory]::Delete($stage,$true) }'));
   for (const fragment of ['$rules.Count -ne 2', '$actual.AreAccessRulesProtected', 'S-1-5-32-544', 'S-1-5-18', '$length -gt 262144', '$bytes.Length -gt 262144', "$r.cleanup.status -ceq 'ABSENT'", '$r.cleanup.enumerationComplete -eq $true', '$r.cleanup.remaining -eq 0', '$r.WFP_PROOF_OBJECTS_REMAINING -eq 0', '$r.engineCloseCode -eq 0', 'exit $code']) assert.ok(script.includes(fragment), fragment);
+  assert.ok(script.includes('$r.version -ne 2'));
+  assert.ok(!script.includes('$r.version -ne 1'));
+  for (const fragment of ["$r.PSObject.Properties.Name -notcontains 'filterLayout'", '$null -eq $r.filterLayout', "throw 'Missing v2 filter layout'", "'objects' -or $r.PSObject.Properties.Name -contains 'filters'", "'queryBeforeTraffic' -or $r.PSObject.Properties.Name -contains 'matrix'", 'if ($hasQueryEvidence)', "$r.PSObject.Properties.Name -notcontains 'filterDiagnostics'", '$r.filterDiagnostics -isnot [System.Array]', "throw 'Missing v2 filter diagnostics array'"]) assert.ok(script.includes(fragment), fragment);
+  assert.ok(script.indexOf("throw 'Missing v2 filter diagnostics array'") < script.indexOf('$receiptHash=(Get-FileHash'), 'validate v2 evidence before receipt exposure');
   const canonical = canonicalCommandBytes(handoff.humanRunElevatedPowerShellCommand);
   assert.equal(canonical.subarray(0, 3).equals(Buffer.from([0xEF, 0xBB, 0xBF])), false, 'canonical command bytes must be BOM-free UTF-8');
   assert.equal(canonical.subarray(-2).equals(Buffer.from('\r\n', 'utf8')), true, 'canonical command bytes must end with a single CRLF');
@@ -377,7 +504,12 @@ try {
   if ($length -le 0 -or $length -gt 262144) { throw 'Receipt byte bound' }
   $text=[IO.File]::ReadAllText(${quote(stagedReceipt)})
   $r=ConvertFrom-Json -InputObject $text
-  if ($r.schema -cne 'wfp-localhost-proof' -or $r.version -ne 1 -or $r.DNS_SERVICE_DELEGATION_CONTAINMENT -cne 'UNKNOWN' -or @('EXACT_APP_LOCALHOST_MATRIX_PROVEN','MATRIX_NOT_PROVEN','UNKNOWN','HUMAN_ELEVATION_REQUIRED_FOR_WFP_PROOF','WFP_POLICY_INSTALLATION_BLOCKED','PROOF_OBJECTS_REMAIN') -cnotcontains $r.classification) { throw 'Invalid live receipt' }
+  if ($r.schema -cne 'wfp-localhost-proof' -or $r.version -ne 2 -or $r.DNS_SERVICE_DELEGATION_CONTAINMENT -cne 'UNKNOWN' -or @('EXACT_APP_LOCALHOST_MATRIX_PROVEN','MATRIX_NOT_PROVEN','UNKNOWN','HUMAN_ELEVATION_REQUIRED_FOR_WFP_PROOF','WFP_POLICY_INSTALLATION_BLOCKED','PROOF_OBJECTS_REMAIN') -cnotcontains $r.classification) { throw 'Invalid live receipt' }
+  if ($r.PSObject.Properties.Name -notcontains 'filterLayout' -or $null -eq $r.filterLayout) { throw 'Missing v2 filter layout' }
+  $hasQueryEvidence=($r.PSObject.Properties.Name -contains 'objects' -or $r.PSObject.Properties.Name -contains 'filters' -or $r.PSObject.Properties.Name -contains 'queryBeforeTraffic' -or $r.PSObject.Properties.Name -contains 'matrix')
+  if ($hasQueryEvidence) {
+    if ($r.PSObject.Properties.Name -notcontains 'filterDiagnostics' -or $r.filterDiagnostics -isnot [System.Array]) { throw 'Missing v2 filter diagnostics array' }
+  }
   if ($r.PSObject.Properties.Name -contains 'identity') {
     if ($r.identity.controller -cne ${quote(stagedController)} -or $r.identity.probe -cne ${quote(stagedProbe)} -or $r.identity.controllerSha256 -cne '${controllerSha256}' -or $r.identity.probeSha256 -cne '${probeSha256}') { throw 'Receipt staged identity mismatch' }
   } elseif ($code -eq 0) { throw 'Missing receipt identity' }
@@ -463,4 +595,4 @@ if (require.main === module) {
     console.log(JSON.stringify(args[0] === '--prepare' ? prepare() : checks, null, 2));
   } catch (error) { console.error(error.message); process.exitCode = 1; }
 }
-module.exports = { receipt, staticChecks };
+module.exports = { receipt, staticChecks, validateFilterDiagnostic };
