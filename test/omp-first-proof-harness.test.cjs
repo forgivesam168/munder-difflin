@@ -64,6 +64,13 @@ for (const fixture of h.RESPONSE_FIXTURES) test(`loopback Responses fixture and 
     assert.equal(capture.requests[0].auth.matched, true);
     assert.equal(capture.requests[0].auth.sha256, hash(auth.authorization()));
     assert.equal(JSON.stringify(capture).includes(auth.authorization()), false);
+    // Exact request shape is captured: content type, raw body digest, bounded keys, absent stream.
+    assert.equal(capture.requests[0].contentType, 'application/json');
+    assert.equal(capture.requests[0].bodySha256, hash(Buffer.from(JSON.stringify({ model: 'exact-model', input: 'synthetic' }))));
+    assert.deepEqual(capture.requests[0].topLevelKeys, ['input', 'model']);
+    assert.equal(capture.requests[0].streamPresent, false);
+    assert.equal(capture.requests[0].streamValue, null);
+    assert.equal(capture.requests[0].accepted, true);
     const f = descriptor(server.origin);
     assert.equal(h.compareActualModelIdentity(f.route, f.adapter, capture.requests).classification, 'ACTUAL_MODEL_IDENTITY_MATCH');
   } finally {
@@ -88,6 +95,66 @@ test('server rejects wrong method/path/auth/body/count and never retains body or
   } finally { await server.close(); auth.destroy(); }
   assert.throws(() => auth.authorization(), /destroyed/);
   await assert.rejects(h.startFakeResponsesServer(auth, 'INVALID'));
+});
+
+test('request evidence captures exact stream shape, body digest and bounded keys', async () => {
+  const auth = h.createLocalAuthSentinel(), server = await h.startFakeResponsesServer(auth, 'NON_STREAMING_SUCCESS');
+  try {
+    const accept = async body => (await request(server, auth.authorization(), body)).status;
+    assert.equal(await accept('{"model":"exact-model","stream":true}'), 200);
+    assert.equal(await accept('{"model":"exact-model","stream":false}'), 200);
+    assert.equal(await accept('{"model":"exact-model"}'), 200);
+    // A present non-boolean `stream` is durably observed and then fails closed with HTTP 400.
+    assert.equal(await accept('{"model":"exact-model","stream":"yes"}'), 400);
+    assert.equal(await accept('{"model":"exact-model","stream":null}'), 400);
+    assert.equal(await accept('{"model":"exact-model","stream":false,"input":"raw-prompt-text"}'), 200);
+    const captures = server.snapshot().requests;
+    const shape = capture => ({ json: capture.json, accepted: capture.accepted, model: capture.model,
+      streamPresent: capture.streamPresent, streamValue: capture.streamValue, keys: capture.topLevelKeys });
+    assert.deepEqual(captures.map(shape), [
+      { json: 'VALID', accepted: true, model: 'exact-model', streamPresent: true, streamValue: true, keys: ['model', 'stream'] },
+      { json: 'VALID', accepted: true, model: 'exact-model', streamPresent: true, streamValue: false, keys: ['model', 'stream'] },
+      { json: 'VALID', accepted: true, model: 'exact-model', streamPresent: false, streamValue: null, keys: ['model'] },
+      { json: 'VALID', accepted: false, model: 'exact-model', streamPresent: true, streamValue: null, keys: ['model', 'stream'] },
+      { json: 'VALID', accepted: false, model: 'exact-model', streamPresent: true, streamValue: null, keys: ['model', 'stream'] },
+      { json: 'VALID', accepted: true, model: 'exact-model', streamPresent: true, streamValue: false, keys: ['input', 'model', 'stream'] }
+    ]);
+    // The body digest binds the exact raw bytes sent, not the parsed value or its serialization.
+    const sent = '{"model":"exact-model","stream":true}';
+    assert.equal(captures[0].bodyBytes, Buffer.byteLength(sent));
+    assert.equal(captures[0].bodySha256, hash(Buffer.from(sent)));
+    assert.notEqual(captures[0].bodySha256, captures[2].bodySha256);
+    assert.equal(captures.every(capture => capture.contentType === 'application/json'), true);
+    // Only key names and digests are retained: never the raw body, prompt text or auth.
+    const serialized = JSON.stringify(server.snapshot());
+    assert.equal(serialized.includes('input'), true);
+    assert.equal(serialized.includes('raw-prompt-text'), false);
+    assert.equal(serialized.includes(auth.authorization()), false);
+  } finally { await server.close(); auth.destroy(); }
+});
+
+test('request validation rejects mutated content type and unbounded or unsafe key sets', async () => {
+  const auth = h.createLocalAuthSentinel(), server = await h.startFakeResponsesServer(auth, 'NON_STREAMING_SUCCESS');
+  try {
+    const headers = { 'content-type': 'text/plain', authorization: auth.authorization() };
+    assert.equal((await request(server, auth.authorization(), '{"model":"exact-model"}', { headers })).status, 400);
+    assert.equal((await request(server, auth.authorization(), '{"model":"exact-model"}',
+      { headers: { 'content-type': 'application/json; charset=utf-8', authorization: auth.authorization() } })).status, 400);
+    assert.equal(server.snapshot().requests.length, 0);
+    // A secret-named or oversized top-level key is not admissible request-shape evidence.
+    assert.equal((await request(server, auth.authorization(),
+      '{"model":"exact-model","authorization":"Bearer raw"}')).status, 400);
+    const many = { model: 'exact-model' };
+    for (let i = 0; i <= h.PROOF_LIMITS.bodyTopLevelKeys; i++) many['k' + i] = 1;
+    assert.equal((await request(server, auth.authorization(), JSON.stringify(many))).status, 400);
+    assert.equal((await request(server, auth.authorization(),
+      JSON.stringify({ model: 'exact-model', ['k'.repeat(h.PROOF_LIMITS.bodyKeyBytes + 1)]: 1 }))).status, 400);
+    const refused = server.snapshot().requests;
+    assert.equal(refused.every(capture => capture.accepted === false && capture.topLevelKeys.length === 0
+      && capture.streamPresent === false && capture.streamValue === null), true);
+    assert.equal(JSON.stringify(server.snapshot()).includes('Bearer raw'), false);
+    assert.equal((await request(server, auth.authorization())).status, 200);
+  } finally { await server.close(); auth.destroy(); }
 });
 
 test('oversized headers and occupied loopback port fail closed with listener cleanup', async () => {
@@ -283,7 +350,18 @@ for (const mode of ['SUCCESS', 'FAILURE', 'TIMEOUT', 'OVERFLOW']) test(`real own
       x => { x.preparation.modelsFile.content += ' '; }, x => { x.preparation.durableReservation.status = 'CREATED'; },
       x => { x.preparation.semanticVersionDisposition.provenance = 'PE_METADATA'; },
       x => { x.server.rejected = 1; }, x => { x.preparation.historicalSequence = false; },
-      x => { x.route.model = 'x'.repeat(129); }, x => { x.preparation.auth.raw = auth.authorization(); }
+      x => { x.route.model = 'x'.repeat(129); }, x => { x.preparation.auth.raw = auth.authorization(); },
+      x => { x.server.requests[0].contentType = 'text/plain'; }, x => { delete x.server.requests[0].contentType; },
+      x => { x.server.requests[0].bodySha256 = 'b'.repeat(64); }, x => { x.server.requests[0].bodySha256 = null; },
+      x => { x.server.requests[0].topLevelKeys = ['model', 'input']; },
+      x => { x.server.requests[0].topLevelKeys = ['input', 'model', 'stream']; },
+      x => { x.server.requests[0].topLevelKeys = ['model', 'model']; },
+      x => { x.server.requests[0].streamPresent = true; },
+      x => { x.server.requests[0].streamValue = true; },
+      x => { x.server.requests[0].model = 'other-model'; },
+      x => { x.server.requests[0].accepted = false; },
+      x => { x.server.requests[0].json = 'INVALID'; },
+      x => { x.server.requests[0].authorization = auth.authorization(); }
     ]) assert.throws(() => h.freezeProofManifest(mutate(change)));
     assert.throws(() => h.freezeProofManifest(clone(m)), /Receipt binding/);
   } finally { await server.close(); auth.destroy(); }

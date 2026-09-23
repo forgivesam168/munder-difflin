@@ -10,11 +10,13 @@ import type { OwnedPtyReceipt, OwnedPtyLaunch, OwnedPtyHandle } from './windowsO
 import type { Socket } from 'node:net';
 
 /** Preparation utilities, not an OMP launcher or an admission authority. */
-export const PROOF_LIMITS = Object.freeze({ bodyBytes: 32768, headerBytes: 4096, requests: 8,
-  streamBytes: 65536, lines: 256, lineBytes: 8192, manifestBytes: 262144, timeoutMs: 5000 });
+export const PROOF_LIMITS = Object.freeze({ bodyBytes: 32768, bodyTopLevelKeys: 64, bodyKeyBytes: 128, headerBytes: 4096,
+  requests: 8, streamBytes: 65536, lines: 256, lineBytes: 8192, manifestBytes: 262144, timeoutMs: 5000 });
 const HASH = /^[a-f0-9]{64}$/;
 const ID = /^[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}$/;
 const SYNTHETIC_PREFIX = 'munder-local-only-';
+/** Field names that must never be persisted, even as the key text of an observed request body. */
+const SECRET_KEY = /authorization|password|secret|credential|api.?key|access.?token/i;
 const sha = (bytes: string | Buffer): string => createHash('sha256').update(bytes).digest('hex');
 function fail(message: string): never { throw new Error(message); }
 function integer(value: unknown, min: number, max: number): asserts value is number {
@@ -25,6 +27,18 @@ function identifier(value: unknown): asserts value is string {
 }
 function digest(value: unknown): asserts value is string {
   if (typeof value !== 'string' || !HASH.test(value)) fail('Invalid SHA256');
+}
+/** Bounded proof-safe top-level key name. The explicit key-length bound keeps hostile key text out of evidence. */
+function bodyKey(value: unknown): value is string {
+  return typeof value === 'string' && value.length > 0 && value.length <= PROOF_LIMITS.bodyKeyBytes
+    && /^[A-Za-z0-9][A-Za-z0-9._:/-]*$/.test(value) && !value.includes(SYNTHETIC_PREFIX) && !SECRET_KEY.test(value);
+}
+/** Canonically sorted own enumerable top-level keys, or null when any key is unbounded or unobservable.
+ * Null means the request fails closed and no key text is retained. Values are never captured.
+ * The count and key-length bounds are explicit so hostile key text cannot reach evidence. */
+function bodyKeys(value: Record<string, unknown>): readonly string[] | null {
+  const keys = Object.keys(value);
+  return keys.length > PROOF_LIMITS.bodyTopLevelKeys || !keys.every(bodyKey) ? null : Object.freeze(keys.sort());
 }
 function exact(value: unknown, keys: readonly string[]): asserts value is Record<string, unknown> {
   if (!value || typeof value !== 'object' || Array.isArray(value)
@@ -75,6 +89,19 @@ export const RESPONSE_FIXTURES = Object.freeze(['STREAMING_SUCCESS', 'NON_STREAM
 export type ResponseFixture = typeof RESPONSE_FIXTURES[number];
 export interface RequestEvidence {
   readonly order: number; readonly method: string; readonly path: string; readonly bodyBytes: number;
+  /** Exact Content-Type string that passed request validation; validation rejects every other value. */
+  readonly contentType: string;
+  /** Hash of the bounded raw request body bytes, computed before any decoding or semantic parsing. */
+  readonly bodySha256: string;
+  /** Sorted own enumerable top-level keys of a valid top-level JSON object; empty otherwise. Never values. */
+  readonly topLevelKeys: readonly string[];
+  /** True only when an own `stream` property was observed on a valid top-level object. */
+  readonly streamPresent: boolean;
+  /** Boolean `stream` value; null when absent or when a present value was not a boolean. */
+  readonly streamValue: boolean | null;
+  /** 'VALID' only for a top-level JSON object with a bounded key set and an exact `model` identifier;
+   * every other body — malformed JSON, non-object, unbounded key set, absent/invalid model — is 'INVALID'
+   * and retains no key text or model. */
   readonly json: 'VALID' | 'INVALID'; readonly model: string | null; readonly auth: AuthSentinelEvidence;
   readonly accepted: boolean;
 }
@@ -82,6 +109,8 @@ export interface FakeServerSnapshot {
   readonly origin: string; readonly fixture: ResponseFixture; readonly listening: boolean;
   readonly closed: boolean; readonly overflow: boolean; readonly rejected: number;
   readonly requests: readonly RequestEvidence[];
+  /** Consistency digest over the exact capture array; a substituted field changes it. Not a secret. */
+  readonly requestsSha256: string;
 }
 export interface FakeResponsesServer {
   readonly origin: string;
@@ -151,16 +180,31 @@ export async function startFakeResponsesServer(sentinel: LocalAuthSentinel, fixt
     request.on('error', () => { if (!response.headersSent) reject(response, 400); });
     request.on('end', () => {
       if (exceeded) return;
-      let model: string | null = null, valid = false;
+      // Hash the exact bounded raw bytes before any decoding or semantic interpretation.
+      const raw = Buffer.concat(chunks), bodySha256 = sha(raw);
+      let model: string | null = null, valid = false, topLevelKeys: readonly string[] = [];
+      let streamPresent = false, streamValue: boolean | null = null;
       try {
-        const parsed: unknown = JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(Buffer.concat(chunks)));
+        const parsed: unknown = JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(raw));
         if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
-          const candidate = (parsed as Record<string, unknown>).model;
-          identifier(candidate); model = candidate; valid = true;
+          const object = parsed as Record<string, unknown>;
+          // A body whose top-level key set is unboundable is not admissible request-shape evidence.
+          const keys = bodyKeys(object);
+          if (keys !== null) {
+            const candidate = object.model;
+            identifier(candidate);
+            topLevelKeys = keys; model = candidate; valid = true;
+            // Absent, boolean and non-boolean `stream` are three distinct observed facts; never coerced.
+            const stream = object.stream;
+            streamPresent = Object.hasOwn(object, 'stream');
+            streamValue = streamPresent && typeof stream === 'boolean' ? stream : null;
+          }
         }
       } catch { /* Invalid body is deliberately never retained. */ }
-      const accepted = valid && model !== null;
+      // A bounded valid object with an exact model and an absent-or-boolean stream is accepted.
+      const accepted = valid && model !== null && (!streamPresent || streamValue !== null);
       captures.push(Object.freeze({ order, method: 'POST', path: '/v1/responses', bodyBytes: size,
+        contentType: request.headers['content-type'] as string, bodySha256, topLevelKeys, streamPresent, streamValue,
         json: valid ? 'VALID' : 'INVALID', model, auth, accepted }));
       captures.sort((left, right) => left.order - right.order);
       if (!accepted) { reject(response, 400); return; }
@@ -195,7 +239,8 @@ export async function startFakeResponsesServer(sentinel: LocalAuthSentinel, fixt
     server.close(); for (const socket of sockets) socket.destroy(); fail('Non-loopback listener refused');
   }
   const origin = `http://127.0.0.1:${address.port}`;
-  const take = (): FakeServerSnapshot => snapshot({ origin, fixture, listening: server.listening, closed, overflow, rejected, requests: captures });
+  const take = (): FakeServerSnapshot => snapshot({ origin, fixture, listening: server.listening, closed, overflow,
+    rejected, requests: captures, requestsSha256: sha(JSON.stringify(captures)) });
   return Object.freeze({ origin, snapshot: take, close() {
     if (!closing) closing = new Promise<FakeServerSnapshot>((accept, rejectClose) => {
       server.close(error => { if (error) { rejectClose(error); return; } closed = true; accept(take()); });
@@ -266,7 +311,7 @@ export function observeNdjson(bytes: Buffer, historicalSequence?: readonly strin
       if (value && typeof value === 'object' && !Array.isArray(value)) {
         const keys = Object.keys(value);
         if (keys.length > 64 || keys.some(key => !ID.test(key) || key.includes(SYNTHETIC_PREFIX)
-          || /authorization|password|secret|credential|api.?key|access.?token/i.test(key))) fail('Unsafe NDJSON keys');
+          || SECRET_KEY.test(key))) fail('Unsafe NDJSON keys');
         topLevelKeys = keys;
         const candidate = (key: string): string | null => {
           const field = (value as Record<string, unknown>)[key];
@@ -570,7 +615,7 @@ function boundedData(value: unknown, depth = 0, budget = { nodes: 0 }): void {
   } else {
     if (![Object.prototype, null].includes(Object.getPrototypeOf(value))) fail('Nonplain manifest data');
     for (const key of Reflect.ownKeys(value)) {
-      if (typeof key !== 'string' || /authorization|password|secret|credential|api.?key|access.?token/i.test(key)) fail('Raw auth-like manifest field');
+      if (typeof key !== 'string' || SECRET_KEY.test(key)) fail('Raw auth-like manifest field');
       const item = Object.getOwnPropertyDescriptor(value, key);
       if (!item || !('value' in item) || !item.enumerable) fail('Non-data manifest field'); boundedData(item.value, depth + 1, budget);
     }
@@ -601,26 +646,49 @@ export function freezeProofManifest(input: unknown): Readonly<ProofManifest> {
     exact(claim, ['kind', 'id', 'bindingSha256']); identifier(claim.id);
     if (claim.kind !== 'IN_MEMORY_SIMULATION' || claim.bindingSha256 !== m.bindingSha256) fail('Simulated authority substitution');
   }
-  exact(m.server, ['origin', 'fixture', 'listening', 'closed', 'overflow', 'rejected', 'requests']);
+  exact(m.server, ['origin', 'fixture', 'listening', 'closed', 'overflow', 'rejected', 'requests', 'requestsSha256']);
   if (m.server.origin !== m.boundary.origin || !(RESPONSE_FIXTURES as readonly string[]).includes(m.server.fixture)) fail('Server substitution');
   for (const key of ['listening', 'closed', 'overflow'] as const) if (typeof m.server[key] !== 'boolean') fail('Invalid server boolean');
   integer(m.server.rejected, 0, 2147483647);
+  digest(m.server.requestsSha256);
   if (!Array.isArray(m.server.requests) || m.server.requests.length > PROOF_LIMITS.requests) fail('Too many captures');
   let lastOrder = 0;
   for (const request of m.server.requests) {
-    exact(request, ['order', 'method', 'path', 'bodyBytes', 'json', 'model', 'auth', 'accepted']);
+    exact(request, ['order', 'method', 'path', 'bodyBytes', 'contentType', 'bodySha256', 'topLevelKeys',
+      'streamPresent', 'streamValue', 'json', 'model', 'auth', 'accepted']);
     integer(request.order, lastOrder + 1, PROOF_LIMITS.requests); lastOrder = request.order;
     integer(request.bodyBytes, 0, PROOF_LIMITS.bodyBytes);
+    digest(request.bodySha256);
+    if (typeof request.contentType !== 'string' || request.contentType !== 'application/json') fail('Invalid request content type');
+    if (!Array.isArray(request.topLevelKeys)) fail('Invalid captured top-level keys');
+    const topLevelKeys: readonly unknown[] = request.topLevelKeys;
+    if (topLevelKeys.length > PROOF_LIMITS.bodyTopLevelKeys
+      || !topLevelKeys.every(bodyKey) || !equal(topLevelKeys, [...topLevelKeys].sort())
+      || !topLevelKeys.every((key, index) => topLevelKeys.indexOf(key) === index)) fail('Invalid captured top-level keys');
+    if (typeof request.streamPresent !== 'boolean'
+      || (request.streamValue !== null && typeof request.streamValue !== 'boolean')) fail('Invalid captured stream facts');
     exact(request.auth, ['present', 'sha256', 'matched']);
     if (typeof request.auth.present !== 'boolean' || typeof request.auth.matched !== 'boolean'
       || request.auth.matched !== (request.auth.sha256 !== null) || (request.auth.matched && !request.auth.present)) fail('Invalid redacted auth facts');
     if (request.auth.sha256 !== null) digest(request.auth.sha256);
     if (request.method !== 'POST' || request.path !== '/v1/responses' || typeof request.json !== 'string'
       || !['VALID', 'INVALID'].includes(request.json)
-      || typeof request.accepted !== 'boolean' || request.accepted !== (request.json === 'VALID' && request.model !== null)
+      || typeof request.accepted !== 'boolean'
       || !request.auth.matched) fail('Invalid request evidence');
     if (request.model !== null) identifier(request.model);
+    // Stream presence, key membership and value type must describe one consistent observation.
+    if (request.streamPresent !== topLevelKeys.includes('stream')) fail('Stream presence contradicts captured keys');
+    if (!request.streamPresent && request.streamValue !== null) fail('Value retained for an absent stream field');
+    if (request.json === 'INVALID') {
+      if (topLevelKeys.length !== 0 || request.streamPresent || request.streamValue !== null
+        || request.model !== null) fail('Invalid body retained semantic shape');
+    } else if (request.model === null || !topLevelKeys.includes('model')) fail('Valid body lacks an observed exact model');
+    // A present non-boolean `stream` stays durably observable as present/null; it is never accepted.
+    if (request.streamPresent && request.streamValue === null && request.accepted) fail('Non-boolean stream silently accepted');
+    if (request.accepted !== (request.json === 'VALID' && request.model !== null && (!request.streamPresent || request.streamValue !== null)))
+      fail('Request acceptance contradicts observed shape');
   }
+  if (sha(JSON.stringify(m.server.requests)) !== m.server.requestsSha256) fail('Request evidence substitution');
   exact(m.modelIdentity, ['routeModel', 'modelsFileModel', 'argvModel', 'requestModels', 'classification']);
   [m.modelIdentity.routeModel, m.modelIdentity.modelsFileModel, m.modelIdentity.argvModel].forEach(identifier);
   const models = m.server.requests.filter(request => request.accepted).map(request => request.model);
