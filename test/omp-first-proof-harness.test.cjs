@@ -22,7 +22,7 @@ function request(server, authorization, body = JSON.stringify({ model: 'exact-mo
     const req = http.request({ hostname: '127.0.0.1', port: Number(target.port), path: '/v1/responses', method: 'POST',
       agent: false, headers: { 'content-type': 'application/json', authorization }, ...options }, res => {
       const chunks = [];
-      const finish = ended => resolve({ status: res.statusCode, bytes: Buffer.concat(chunks), ended });
+      const finish = ended => resolve({ status: res.statusCode, contentType: res.headers['content-type'], bytes: Buffer.concat(chunks), ended });
       res.on('data', chunk => chunks.push(chunk)); res.once('end', () => finish(true));
       res.once('aborted', () => finish(false)); res.on('error', () => finish(false));
     });
@@ -71,11 +71,73 @@ for (const fixture of h.RESPONSE_FIXTURES) test(`loopback Responses fixture and 
     assert.equal(capture.requests[0].streamPresent, false);
     assert.equal(capture.requests[0].streamValue, null);
     assert.equal(capture.requests[0].accepted, true);
+    const evidence = capture.responses[0];
+    assert.equal(capture.responses.length, 1);
+    assert.equal(evidence.order, capture.requests[0].order);
+    assert.equal(evidence.httpStatus, response.status);
+    assert.equal(evidence.contentType, response.contentType);
+    assert.equal(evidence.emittedBytes, response.bytes.length);
+    assert.equal(evidence.emittedSha256, hash(response.bytes));
+    assert.equal(capture.responsesSha256, hash(JSON.stringify(capture.responses)));
+    assert.equal(evidence.transport, fixture === 'PREMATURE_EOF' ? 'PREMATURE_EOF' : 'COMPLETE');
+    if (fixture === 'PREMATURE_EOF') {
+      assert.ok(evidence.generatedBytes > evidence.emittedBytes);
+      assert.notEqual(evidence.generatedSha256, evidence.emittedSha256);
+    } else {
+      assert.equal(evidence.generatedBytes, evidence.emittedBytes);
+      assert.equal(evidence.generatedSha256, evidence.emittedSha256);
+    }
+    assert.equal(evidence.parseValid, !['PREMATURE_EOF', 'MALFORMED_RESPONSE'].includes(fixture));
+    assert.equal(evidence.streaming, ['STREAMING_SUCCESS', 'INCOMPLETE_COMPLETION'].includes(fixture));
+    const terminal = fixture === 'INCOMPLETE_COMPLETION' ? 'response.incomplete'
+      : ['STREAMING_SUCCESS', 'NON_STREAMING_SUCCESS'].includes(fixture) ? 'response.completed' : null;
+    assert.equal(evidence.terminalType, terminal);
+    const facts = h.responseCompletionFacts(capture, server);
+    assert.deepEqual(facts, { httpStatus: response.status, transportEnded: response.ended,
+      responseValid: evidence.parseValid, explicitCompleted: terminal === 'response.completed', explicitIncomplete: terminal === 'response.incomplete' });
+    assert.deepEqual(h.responseCompletionFacts(capture, server), facts); // Reusable observation, not one-shot admission.
+    assert.equal(h.classifyCompletion({ ...success, ...facts }), fixture === 'MALFORMED_RESPONSE' ? 'EVENT_SCHEMA_MISMATCH'
+      : terminal === 'response.completed' ? 'COMPLETION_PROVEN' : 'COMPLETION_NOT_PROVEN');
+    assert.throws(() => { capture.fixture = 'HTTP_ERROR'; }, TypeError);
+    assert.deepEqual(h.responseCompletionFacts(capture, server), facts);
+    for (const forged of [{ ...capture }, clone(capture), {}, { ...capture, fixture: 'HTTP_ERROR' }])
+      assert.throws(() => h.responseCompletionFacts(forged, server), /Server issuer binding/);
+    assert.throws(() => h.responseCompletionFacts(capture, { ...server }), /Server issuer binding/);
+    for (const [key, value] of Object.entries({ httpStatus: 201, contentType: 'text/plain', generatedBytes: 0,
+      generatedSha256: H, emittedBytes: 0, emittedSha256: H, transport: 'ABORTED', streaming: !evidence.streaming,
+      parseValid: !evidence.parseValid, terminalType: 'response.incomplete' })) {
+      const changed = clone(capture); changed.responses[0][key] = value;
+      changed.responsesSha256 = hash(JSON.stringify(changed.responses));
+      assert.throws(() => h.responseCompletionFacts(changed, server), /Server issuer binding/);
+      assert.throws(() => { evidence[key] = value; }, TypeError);
+    }
+    const foreign = await h.startFakeResponsesServer(auth, fixture);
+    try { assert.throws(() => h.responseCompletionFacts(capture, foreign), /Server issuer binding/); }
+    finally { const stopped = await foreign.close(); assert.equal(stopped.closed, true); assert.equal(stopped.listening, false); }
     const f = descriptor(server.origin);
     assert.equal(h.compareActualModelIdentity(f.route, f.adapter, capture.requests).classification, 'ACTUAL_MODEL_IDENTITY_MATCH');
   } finally {
     const first = await server.close(); assert.equal(first.closed, true); assert.equal(first.listening, false);
     assert.deepEqual(await server.close(), first);
+    await assert.rejects(request(server, auth.authorization())); auth.destroy();
+  }
+});
+
+test('issuer observations with no response or multiple responses cannot prove completion', async () => {
+  const auth = h.createLocalAuthSentinel(), server = await h.startFakeResponsesServer(auth, 'NON_STREAMING_SUCCESS');
+  try {
+    const empty = server.snapshot();
+    const absent = { httpStatus: null, transportEnded: false, responseValid: false, explicitCompleted: false, explicitIncomplete: false };
+    assert.deepEqual(h.responseCompletionFacts(empty, server), absent);
+    await request(server, auth.authorization());
+    await request(server, auth.authorization());
+    const multiple = server.snapshot();
+    assert.deepEqual(multiple.responses.map(response => response.order), [1, 2]);
+    assert.deepEqual(h.responseCompletionFacts(multiple, server), absent);
+    assert.deepEqual(h.responseCompletionFacts(empty, server), absent);
+    assert.equal(h.classifyCompletion({ ...success, ...absent }), 'PROCESS_EXIT_WITHOUT_TERMINAL_EVENT');
+  } finally {
+    const stopped = await server.close(); assert.equal(stopped.closed, true); assert.equal(stopped.listening, false);
     await assert.rejects(request(server, auth.authorization())); auth.destroy();
   }
 });
@@ -270,7 +332,7 @@ function nativeBackend(t) {
   return { helperPath, helperSha256: fileHash(helperPath), scriptPath, scriptSha256: fileHash(scriptPath),
     nativeSourcePath, nativeSourceSha256: fileHash(nativeSourcePath), helperEnv, executableSha256: fileHash(process.execPath) };
 }
-function manifest(processEvidence, server, auth, f) {
+function manifest(processEvidence, server, auth, f, issuer) {
   const preparation = {
     core: { taskId: 'task', runId: 'run', workerId: 'worker', repositoryId: 'repo', treeSha: 'c'.repeat(40) },
     adapter: { id: 'omp', version: '18.2.7', thinking: 'high' },
@@ -293,7 +355,8 @@ function manifest(processEvidence, server, auth, f) {
     boundary: { kind: 'TEST_LOOPBACK_ONLY', origin: server.origin, evidenceSha256: H },
     server, modelIdentity: h.compareActualModelIdentity(f.route, f.adapter, server.requests), process: processEvidence,
     ndjson: h.observeNdjson(Buffer.from(processEvidence.stdout.base64, 'base64')),
-    completionInput: success, completion: 'COMPLETION_PROVEN', cleanup: { listenerClosed: true, childClosed: true, job: 'VERIFIED_EMPTY' } };
+    completionInput: { ...success, ...h.responseCompletionFacts(server, issuer) },
+    completion: 'COMPLETION_PROVEN', cleanup: { listenerClosed: true, childClosed: true, job: 'VERIFIED_EMPTY' } };
   m.bindingSha256 = h.proofBindingSha256(m);
   m.reservation = { kind: 'IN_MEMORY_SIMULATION', id: 'reservation', bindingSha256: m.bindingSha256 };
   m.admission = { kind: 'IN_MEMORY_SIMULATION', id: 'admission', bindingSha256: m.bindingSha256 };
@@ -339,9 +402,17 @@ for (const mode of ['SUCCESS', 'FAILURE', 'TIMEOUT', 'OVERFLOW']) test(`real own
   const auth = h.createLocalAuthSentinel(), server = await h.startFakeResponsesServer(auth, 'NON_STREAMING_SUCCESS');
   try {
     await request(server, auth.authorization()); const stopped = await server.close();
-    const m = manifest(result, stopped, auth, descriptor(server.origin));
-    const frozen = h.freezeProofManifest(m); assert.ok(Object.isFrozen(frozen.preparation.modelsFile));
-    const mutate = change => { const copy = clone(m); copy.process = result; change(copy); return copy; };
+    const m = manifest(result, stopped, auth, descriptor(server.origin), server);
+    const frozen = h.freezeProofManifest(m, server); assert.ok(Object.isFrozen(frozen.preparation.modelsFile));
+    assert.equal(frozen.mode, 'PROVIDER_FREE_SIMULATION_ONLY');
+    assert.equal(JSON.stringify(frozen).includes(auth.authorization()), false);
+    assert.deepEqual(h.freezeProofManifest(m, server), frozen);
+    const mutate = change => {
+      const copy = clone(m); copy.process = result; change(copy);
+      // Preserve genuine evidence for unrelated mutations so their original validators are exercised.
+      if (JSON.stringify(copy.server) === JSON.stringify(m.server)) copy.server = stopped;
+      return copy;
+    };
     for (const change of [
       x => { x.authorization = 'forbidden'; }, x => { delete x.taskSha256; }, x => { x.argv.push('--model', 'other'); },
       x => { x.modelIdentity.requestModels[0] = 'substitution'; }, x => { x.preparation.environment.HOME = 'other'; },
@@ -362,8 +433,27 @@ for (const mode of ['SUCCESS', 'FAILURE', 'TIMEOUT', 'OVERFLOW']) test(`real own
       x => { x.server.requests[0].accepted = false; },
       x => { x.server.requests[0].json = 'INVALID'; },
       x => { x.server.requests[0].authorization = auth.authorization(); }
-    ]) assert.throws(() => h.freezeProofManifest(mutate(change)));
-    assert.throws(() => h.freezeProofManifest(clone(m)), /Receipt binding/);
+    ]) assert.throws(() => h.freezeProofManifest(mutate(change), server));
+    assert.throws(() => h.freezeProofManifest(clone(m), server), /Server issuer binding/);
+    assert.throws(() => h.freezeProofManifest({ ...clone(m), server: stopped }, server), /Receipt binding/);
+    for (const evidence of [{ ...stopped }, clone(stopped), {}])
+      assert.throws(() => h.freezeProofManifest({ ...m, server: evidence }, server), /Server issuer binding/);
+    const foreign = await h.startFakeResponsesServer(auth, 'NON_STREAMING_SUCCESS');
+    try { assert.throws(() => h.freezeProofManifest(m, foreign), /Server issuer binding/); }
+    finally { await foreign.close(); }
+    for (const [key, value] of Object.entries({ httpStatus: 503, contentType: 'text/plain', generatedBytes: 1,
+      generatedSha256: H, emittedBytes: 1, emittedSha256: H, transport: 'PREMATURE_EOF', streaming: true,
+      parseValid: false, terminalType: 'response.incomplete' })) {
+      const changed = clone(stopped); changed.responses[0][key] = value;
+      changed.responsesSha256 = hash(JSON.stringify(changed.responses));
+      assert.throws(() => h.freezeProofManifest({ ...m, server: changed }, server), /Server issuer binding/);
+    }
+    assert.throws(() => h.freezeProofManifest({ ...m, server: { ...stopped, responsesSha256: H } }, server), /Server issuer binding/);
+    for (const key of ['httpStatus', 'transportEnded', 'responseValid', 'explicitCompleted', 'explicitIncomplete']) {
+      const changed = { ...m, completionInput: { ...m.completionInput, [key]: key === 'httpStatus' ? 503 : !m.completionInput[key] } };
+      changed.completion = h.classifyCompletion(changed.completionInput);
+      assert.throws(() => h.freezeProofManifest(changed, server), /Completion substitution/);
+    }
   } finally { await server.close(); auth.destroy(); }
 });
 

@@ -105,12 +105,31 @@ export interface RequestEvidence {
   readonly json: 'VALID' | 'INVALID'; readonly model: string | null; readonly auth: AuthSentinelEvidence;
   readonly accepted: boolean;
 }
+export interface ResponseEvidence {
+  readonly order: number; readonly httpStatus: number; readonly contentType: string;
+  readonly generatedBytes: number; readonly generatedSha256: string;
+  /** Body bytes handed to the local socket, not peer receipt. ABORTED is unknown (null), never fabricated zero. */
+  readonly emittedBytes: number | null; readonly emittedSha256: string | null;
+  readonly transport: 'COMPLETE' | 'PREMATURE_EOF' | 'ABORTED';
+  readonly streaming: boolean; readonly parseValid: boolean;
+  readonly terminalType: 'response.completed' | 'response.incomplete' | null;
+}
+// Identity proves local issuance only. Read-only evidence is reusable, never consumed;
+// serialization deliberately loses provenance. No runtime admission is granted.
+const serverIssuers = new WeakMap<object, object>();
+const issuedSnapshots = new WeakMap<object, object>();
+function requireServerEvidence(value: FakeServerSnapshot, issuer: FakeResponsesServer): void {
+  const owner = serverIssuers.get(issuer);
+  if (!owner || issuedSnapshots.get(value) !== owner) fail('Server issuer binding mismatch');
+}
 export interface FakeServerSnapshot {
   readonly origin: string; readonly fixture: ResponseFixture; readonly listening: boolean;
   readonly closed: boolean; readonly overflow: boolean; readonly rejected: number;
   readonly requests: readonly RequestEvidence[];
   /** Consistency digest over the exact capture array; a substituted field changes it. Not a secret. */
   readonly requestsSha256: string;
+  readonly responses: readonly ResponseEvidence[];
+  readonly responsesSha256: string;
 }
 export interface FakeResponsesServer {
   readonly origin: string;
@@ -118,37 +137,69 @@ export interface FakeResponsesServer {
   close(): Promise<FakeServerSnapshot>;
 }
 // These handcrafted transport fixtures make no claim about real OMP fixture selection or completion conformance.
-function responseFixture(response: ServerResponse, fixture: ResponseFixture): void {
+function responseFixture(fixture: ResponseFixture): { status: number; contentType: string; bytes: Buffer; truncate: boolean } {
   const complete = { id: 'resp_fixture', object: 'response', status: 'completed',
     output: [{ id: 'msg_fixture', type: 'message', role: 'assistant', status: 'completed',
       content: [{ type: 'output_text', text: 'provider-free fixture result', annotations: [] }] }],
     usage: { input_tokens: 1, output_tokens: 1, total_tokens: 2 } };
-  if (fixture === 'HTTP_ERROR') { response.writeHead(503, { 'content-type': 'application/json' });
-    response.end('{"error":{"type":"fixture_error","message":"deterministic failure"}}'); return; }
-  response.writeHead(200, { 'content-type': fixture === 'STREAMING_SUCCESS' || fixture === 'INCOMPLETE_COMPLETION'
-    ? 'text/event-stream' : 'application/json' });
-  if (fixture === 'MALFORMED_RESPONSE') { response.end('{not-json'); return; }
-  if (fixture === 'PREMATURE_EOF') {
-    // A declared body longer than the bytes delivered makes transport truncation observable.
-    response.write('{"id":"resp_fixture","status":');
-    response.socket?.end(); return;
-  }
-  if (fixture === 'NON_STREAMING_SUCCESS') { response.end(JSON.stringify(complete)); return; }
-  const frame = (event: string, data: unknown) => response.write(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`);
-  frame('response.created', { type: 'response.created', sequence_number: 0,
-    response: { ...complete, status: 'in_progress', output: [] } });
-  frame('response.output_text.delta', { type: 'response.output_text.delta', sequence_number: 1,
-    item_id: 'msg_fixture', output_index: 0, content_index: 0, delta: 'provider-free fixture result' });
-  if (fixture === 'STREAMING_SUCCESS') frame('response.completed', { type: 'response.completed', sequence_number: 2, response: complete });
-  else frame('response.incomplete', { type: 'response.incomplete', sequence_number: 2,
-    response: { ...complete, status: 'incomplete', incomplete_details: { reason: 'max_output_tokens' } } });
-  response.end();
+  const streaming = fixture === 'STREAMING_SUCCESS' || fixture === 'INCOMPLETE_COMPLETION';
+  const frame = (event: string, data: unknown) => `event: ${event}\ndata: ${JSON.stringify(data)}\n\n`;
+  const terminal = fixture === 'INCOMPLETE_COMPLETION' ? 'response.incomplete' : 'response.completed';
+  const body = fixture === 'HTTP_ERROR' ? '{"error":{"type":"fixture_error","message":"deterministic failure"}}'
+    : fixture === 'MALFORMED_RESPONSE' ? '{not-json'
+    : !streaming ? JSON.stringify(complete)
+    : frame('response.created', { type: 'response.created', sequence_number: 0,
+      response: { ...complete, status: 'in_progress', output: [] } })
+      + frame('response.output_text.delta', { type: 'response.output_text.delta', sequence_number: 1,
+        item_id: 'msg_fixture', output_index: 0, content_index: 0, delta: 'provider-free fixture result' })
+      + frame(terminal, { type: terminal, sequence_number: 2, response: terminal === 'response.completed' ? complete
+        : { ...complete, status: 'incomplete', incomplete_details: { reason: 'max_output_tokens' } } });
+  return { status: fixture === 'HTTP_ERROR' ? 503 : 200,
+    contentType: streaming ? 'text/event-stream' : 'application/json', bytes: Buffer.from(body), truncate: fixture === 'PREMATURE_EOF' };
+}
+function parseResponse(bytes: Buffer, streaming: boolean): Pick<ResponseEvidence, 'parseValid' | 'terminalType'> {
+  try {
+    const text = new TextDecoder('utf-8', { fatal: true }).decode(bytes);
+    if (!streaming) {
+      const value = JSON.parse(text);
+      if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error('Invalid response object');
+      return { parseValid: true, terminalType: value.object === 'response' && value.status === 'completed' ? 'response.completed'
+        : value.object === 'response' && value.status === 'incomplete' ? 'response.incomplete' : null };
+    }
+    if (!text.endsWith('\n\n')) throw new Error('Unterminated SSE');
+    let terminalType: ResponseEvidence['terminalType'] = null;
+    for (const frame of text.slice(0, -2).split('\n\n')) {
+      const lines = frame.split('\n');
+      if (lines.length !== 2 || !lines[0].startsWith('event: ') || !lines[1].startsWith('data: ') || terminalType)
+        throw new Error('Invalid SSE frame');
+      const type = lines[0].slice(7), value = JSON.parse(lines[1].slice(6));
+      if (!value || value.type !== type) throw new Error('SSE type mismatch');
+      if (type === 'response.completed' || type === 'response.incomplete') {
+        if (value.response?.object !== 'response' || value.response.status !== (type === 'response.completed' ? 'completed' : 'incomplete'))
+          throw new Error('SSE status mismatch');
+        terminalType = type;
+      }
+    }
+    return { parseValid: true, terminalType };
+  } catch { return { parseValid: false, terminalType: null }; }
+}
+/** Reusable issuer-local observation, not admission. Multiple responses fail closed for completion. */
+export function responseCompletionFacts(value: FakeServerSnapshot, issuer: FakeResponsesServer):
+  Pick<CompletionInput, 'httpStatus' | 'transportEnded' | 'responseValid' | 'explicitCompleted' | 'explicitIncomplete'> {
+  requireServerEvidence(value, issuer);
+  const response = value.responses.length === 1 && value.requests.filter(request => request.accepted).length === 1
+    ? value.responses[0] : undefined;
+  return { httpStatus: response?.httpStatus ?? null, transportEnded: response?.transport === 'COMPLETE',
+    responseValid: response?.parseValid ?? false,
+    explicitCompleted: response?.terminalType === 'response.completed',
+    explicitIncomplete: response?.terminalType === 'response.incomplete' };
 }
 export async function startFakeResponsesServer(sentinel: LocalAuthSentinel, fixture: ResponseFixture,
   port = 0): Promise<FakeResponsesServer> {
   if (!(RESPONSE_FIXTURES as readonly string[]).includes(fixture)) fail('Unknown response fixture');
   integer(port, 0, 65535);
   const captures: RequestEvidence[] = [];
+  const responses: ResponseEvidence[] = [], issuer = {};
   let count = 0, rejected = 0, overflow = false, closed = false;
   let closing: Promise<FakeServerSnapshot> | undefined;
   const sockets = new Set<Socket>();
@@ -208,8 +259,33 @@ export async function startFakeResponsesServer(sentinel: LocalAuthSentinel, fixt
         json: valid ? 'VALID' : 'INVALID', model, auth, accepted }));
       captures.sort((left, right) => left.order - right.order);
       if (!accepted) { reject(response, 400); return; }
-      if (fixture === 'PREMATURE_EOF') response.setHeader('content-length', '4096');
-      responseFixture(response, fixture);
+      // Buffers are private, never mutated or exposed; emitted bytes are exactly this prefix.
+      const generated = responseFixture(fixture), bytes = generated.bytes;
+      const emitted = generated.truncate ? bytes.subarray(0, 29) : bytes;
+      let settled = false;
+      const record = (transport: ResponseEvidence['transport'], written: Buffer) => {
+        if (settled) return;
+        settled = true;
+        const streaming = generated.contentType === 'text/event-stream';
+        responses.push(freeze({ order, httpStatus: generated.status, contentType: generated.contentType,
+          generatedBytes: bytes.length, generatedSha256: sha(bytes),
+          emittedBytes: transport === 'ABORTED' ? null : written.length,
+          emittedSha256: transport === 'ABORTED' ? null : sha(written),
+          transport, streaming, ...parseResponse(written, streaming) }));
+        responses.sort((left, right) => left.order - right.order);
+      };
+      response.once('close', () => record('ABORTED', Buffer.alloc(0)));
+      response.once('error', () => record('ABORTED', Buffer.alloc(0)));
+      response.writeHead(generated.status, { 'content-type': generated.contentType, 'content-length': bytes.length });
+      if (generated.truncate) {
+        response.write(emitted, error => {
+          record(error ? 'ABORTED' : 'PREMATURE_EOF', error ? Buffer.alloc(0) : emitted);
+          response.socket?.end();
+        });
+      } else {
+        response.once('finish', () => record('COMPLETE', emitted));
+        response.end(emitted);
+      }
     });
   });
   server.maxHeadersCount = 32;
@@ -239,15 +315,22 @@ export async function startFakeResponsesServer(sentinel: LocalAuthSentinel, fixt
     server.close(); for (const socket of sockets) socket.destroy(); fail('Non-loopback listener refused');
   }
   const origin = `http://127.0.0.1:${address.port}`;
-  const take = (): FakeServerSnapshot => snapshot({ origin, fixture, listening: server.listening, closed, overflow,
-    rejected, requests: captures, requestsSha256: sha(JSON.stringify(captures)) });
-  return Object.freeze({ origin, snapshot: take, close() {
+  const take = (): FakeServerSnapshot => {
+    const value = snapshot({ origin, fixture, listening: server.listening, closed, overflow,
+      rejected, requests: captures, requestsSha256: sha(JSON.stringify(captures)),
+      responses, responsesSha256: sha(JSON.stringify(responses)) });
+    issuedSnapshots.set(value, issuer);
+    return value;
+  };
+  const handle: FakeResponsesServer = Object.freeze({ origin, snapshot: take, close() {
     if (!closing) closing = new Promise<FakeServerSnapshot>((accept, rejectClose) => {
       server.close(error => { if (error) { rejectClose(error); return; } closed = true; accept(take()); });
       for (const socket of sockets) socket.destroy();
     });
     return closing;
   } });
+  serverIssuers.set(handle, issuer);
+  return handle;
 }
 
 export type ActualModelIdentity = 'ACTUAL_MODEL_IDENTITY_MATCH' | 'ACTUAL_MODEL_IDENTITY_MISMATCH' | 'ACTUAL_MODEL_IDENTITY_NOT_OBSERVED';
@@ -621,10 +704,11 @@ function boundedData(value: unknown, depth = 0, budget = { nodes: 0 }): void {
     }
   }
 }
-export function freezeProofManifest(input: unknown): Readonly<ProofManifest> {
+export function freezeProofManifest(input: unknown, issuer: FakeResponsesServer): Readonly<ProofManifest> {
   boundedData(input); exact(input, MANIFEST_KEYS);
   if (Buffer.byteLength(JSON.stringify(input)) > PROOF_LIMITS.manifestBytes) fail('Manifest byte bound exceeded');
   const m = input as unknown as ProofManifest;
+  const responseFacts = responseCompletionFacts(m.server, issuer);
   if (m.schema !== 'OMP_FIRST_PROOF_PROVIDER_FREE_V1' || m.mode !== 'PROVIDER_FREE_SIMULATION_ONLY') fail('Unsupported manifest schema');
   identifier(m.candidateId);
   if (typeof m.checkpoint !== 'string' || !/^[a-f0-9]{40}$/.test(m.checkpoint)) fail('Invalid checkpoint');
@@ -646,7 +730,12 @@ export function freezeProofManifest(input: unknown): Readonly<ProofManifest> {
     exact(claim, ['kind', 'id', 'bindingSha256']); identifier(claim.id);
     if (claim.kind !== 'IN_MEMORY_SIMULATION' || claim.bindingSha256 !== m.bindingSha256) fail('Simulated authority substitution');
   }
-  exact(m.server, ['origin', 'fixture', 'listening', 'closed', 'overflow', 'rejected', 'requests', 'requestsSha256']);
+  exact(m.server, ['origin', 'fixture', 'listening', 'closed', 'overflow', 'rejected', 'requests', 'requestsSha256', 'responses', 'responsesSha256']);
+  digest(m.server.responsesSha256);
+  if (m.server.responses.some(response => response.transport === 'ABORTED')) fail('Response emitted bytes unknown after abort');
+  if (sha(JSON.stringify(m.server.responses)) !== m.server.responsesSha256
+    || !equal(m.server.responses.map(response => response.order), m.server.requests.filter(request => request.accepted).map(request => request.order)))
+    fail('Response evidence substitution or pending response');
   if (m.server.origin !== m.boundary.origin || !(RESPONSE_FIXTURES as readonly string[]).includes(m.server.fixture)) fail('Server substitution');
   for (const key of ['listening', 'closed', 'overflow'] as const) if (typeof m.server[key] !== 'boolean') fail('Invalid server boolean');
   integer(m.server.rejected, 0, 2147483647);
@@ -707,11 +796,11 @@ export function freezeProofManifest(input: unknown): Readonly<ProofManifest> {
   if (observed.bytes !== m.ndjson.bytes || observed.sha256 !== m.ndjson.sha256 || !equal(observed.lines, m.ndjson.lines)) fail('NDJSON substitution');
   // Historical comparison is optional diagnostic data, never semantic completion authority.
   if (classifyCompletion(m.completionInput) !== m.completion || m.completionInput.exitCode !== m.process.exitCode
-    || m.completionInput.httpStatus !== (m.server.requests.some(request => request.accepted) ? m.server.fixture === 'HTTP_ERROR' ? 503 : 200 : null)
-    || m.completionInput.transportEnded !== (m.server.fixture !== 'PREMATURE_EOF')
-    || m.completionInput.responseValid !== (m.server.fixture !== 'MALFORMED_RESPONSE')
-    || m.completionInput.explicitIncomplete !== (m.server.fixture === 'INCOMPLETE_COMPLETION')
-    || m.completionInput.explicitCompleted !== observed.lines.some(line => line.type === 'fixture_completed' && line.json === 'VALID' && line.terminated)
+    || m.completionInput.httpStatus !== responseFacts.httpStatus
+    || m.completionInput.transportEnded !== responseFacts.transportEnded
+    || m.completionInput.responseValid !== responseFacts.responseValid
+    || m.completionInput.explicitIncomplete !== responseFacts.explicitIncomplete
+    || m.completionInput.explicitCompleted !== responseFacts.explicitCompleted
     || m.completionInput.usefulOutput !== observed.lines.some(line => line.type === 'fixture_completed' && line.json === 'VALID' && line.terminated)
     || m.completionInput.timedOut !== m.process.timedOut) fail('Completion substitution');
   if (m.completion === 'COMPLETION_PROVEN' && (m.modelIdentity.classification !== 'ACTUAL_MODEL_IDENTITY_MATCH'
