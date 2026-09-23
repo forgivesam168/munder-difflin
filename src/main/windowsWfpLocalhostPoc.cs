@@ -15,6 +15,8 @@ using System.Web.Script.Serialization;
 
 public static class WindowsWfpLocalhostPoc
 {
+    public const uint FWPM_FILTER_FLAG_NONE = 0;
+    public const uint FWPM_FILTER_FLAG_INDEXED = 0x00000040;
     // Windows SDK ABI, x64 only. FWP_VALUE0/CONDITION_VALUE0 are 16-byte tagged unions.
     [StructLayout(LayoutKind.Explicit, Size = 16)] public struct Value { [FieldOffset(0)] public uint type; [FieldOffset(8)] public IntPtr pointer; [FieldOffset(8)] public uint u32; [FieldOffset(8)] public ushort u16; [FieldOffset(8)] public byte u8; }
     [StructLayout(LayoutKind.Sequential)] public struct Display { public IntPtr name, description; }
@@ -183,7 +185,10 @@ public static class WindowsWfpLocalhostPoc
         DiagnosticField(fields, mismatches, "filterKey", expected.key.ToString("D"), actual.key.ToString("D"));
         DiagnosticField(fields, mismatches, "layerKey", expected.layer.ToString("D"), actual.layer.ToString("D"));
         DiagnosticField(fields, mismatches, "subLayerKey", expected.sublayer.ToString("D"), actual.sublayer.ToString("D"));
-        DiagnosticField(fields, mismatches, "flags", expected.flags, actual.flags);
+        uint unexpectedFlags = actual.flags & ~(expected.flags | FWPM_FILTER_FLAG_INDEXED);
+        bool flagsMatch = unexpectedFlags == 0;
+        fields.Add("flags", new { requested = expected.flags, actual = actual.flags, allowedSystemReturnedMask = FWPM_FILTER_FLAG_INDEXED, indexed = (actual.flags & FWPM_FILTER_FLAG_INDEXED) != 0, unexpected = unexpectedFlags, match = flagsMatch });
+        if (!flagsMatch) mismatches.Add("flags");
         DiagnosticField(fields, mismatches, "providerKey", expected.provider == IntPtr.Zero ? "null" : "non-null", actual.provider == IntPtr.Zero ? "null" : "non-null");
         DiagnosticField(fields, mismatches, "providerData.size", expected.providerData.size, actual.providerData.size);
         DiagnosticField(fields, mismatches, "filterId", addedId.ToString(System.Globalization.CultureInfo.InvariantCulture), actual.id.ToString(System.Globalization.CultureInfo.InvariantCulture));
@@ -214,7 +219,7 @@ public static class WindowsWfpLocalhostPoc
             using (NativeDisplay display = new NativeDisplay(name))
             {
             for (int i = 0; i < conditions.Length; i++) Marshal.StructureToPtr(conditions[i], IntPtr.Add(block, i * size), false);
-            Filter wanted = new Filter { key = key, display = display.Value, layer = layer, sublayer = sub, weight = Number(1, permit ? 15U : 1U), count = (uint)conditions.Length, conditions = block, action = new Action { type = permit ? 0x1002U : 0x1001U } };
+            Filter wanted = new Filter { key = key, display = display.Value, layer = layer, sublayer = sub, flags = FWPM_FILTER_FLAG_NONE, weight = Number(1, permit ? 15U : 1U), count = (uint)conditions.Length, conditions = block, action = new Action { type = permit ? 0x1002U : 0x1001U } };
             ulong id;
             Filter expectedFilter = wanted; // Preserve policy expectations across the native ref call.
             AssertDisplay(wanted.display, name);
@@ -334,7 +339,7 @@ public static class WindowsWfpLocalhostPoc
     }
     public static int Main(string[] args)
     {
-        Dictionary<string, object> receipt = new Dictionary<string, object>(); receipt["schema"] = "wfp-localhost-proof"; receipt["version"] = 2; receipt["DNS_SERVICE_DELEGATION_CONTAINMENT"] = "UNKNOWN"; receipt["classification"] = "UNKNOWN"; receipt["cleanup"] = "NOT_OPENED";
+        Dictionary<string, object> receipt = new Dictionary<string, object>(); receipt["schema"] = "wfp-localhost-proof"; receipt["version"] = 3; receipt["DNS_SERVICE_DELEGATION_CONTAINMENT"] = "UNKNOWN"; receipt["classification"] = "UNKNOWN"; receipt["cleanup"] = "NOT_OPENED";
         receipt["filterLayout"] = FilterLayout();
         IntPtr engine = IntPtr.Zero, app = IntPtr.Zero; Guid sub = Guid.NewGuid(); Guid[] keys = { Guid.NewGuid(), Guid.NewGuid(), Guid.NewGuid() }; List<TcpListener> listeners = new List<TcpListener>(); UdpClient udp = null; bool installPhase = false, liveAttempted = false, elevationRequired = false;
         FileStream frozenProbe = null;
