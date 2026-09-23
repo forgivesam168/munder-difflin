@@ -1,3 +1,15 @@
+# 2026-09-23 WFP exact-app localhost live proof — VERIFIED_LIVE_FOR_WFP_EGRESS_PROBE
+
+The single Human-authorized `HhHMZS` WFP live proof completed successfully; that authorization is consumed and the proof was not rerun. Accepted remote checkpoint=`79bbbe2c37d3232b9717db7da2aa8e2b4a8a6750`. Authoritative immutable receipt=`.tmp/windows-wfp-localhost-poc-HhHMZS/live-receipt.json`, SHA256=`bb5e43074f30877c26631ee5256ca29946b89113ff5b9749917ee524c1f31b3d`, schema=`wfp-localhost-proof`, version=`3`, classification=`EXACT_APP_LOCALHOST_MATRIX_PROVEN`. Frozen controller SHA256=`8cee9db9f5b233b13ba50623feda03d566ee34357dda2ce973ebeb84b528faf8`; exact protected target `WfpEgressProbe.exe` SHA256=`8e6d207c278378c157d6d1b7301f68d0aec149eb25beb00cdeb02d2ed67eab99`.
+
+- VERIFIED filter query-back: `queryBeforeTraffic=true`; exactly 3 filter diagnostics, all `status=MATCH`; each requested flags=`0`, actual flags=`64` / `0x40`, `allowedSystemReturnedMask=64`, `indexed=true`, `unexpected=0`, `match=true`. Classification: `WFP_FILTER_QUERY_BACK=VERIFIED_LIVE_3_OF_3`.
+- VERIFIED traffic matrix: 5/5 `pass=true`. `tcp-approved` connected to exact `127.0.0.1` approved port and `receiverObserved=true`. `tcp-disallowed`, `tcp-ipv6`, and `tcp-same-host` each returned `SOCKET_ERROR 10013` with `receiverObserved=false`. `udp-disallowed` reported target `SENT`, but `receiverObserved=false` and both `controlBefore=true` / `controlAfter=true`. Classification: `WFP_TRAFFIC_MATRIX=VERIFIED_LIVE_5_OF_5`.
+- VERIFIED cleanup: `engineCloseCode=0`; `cleanup.status=ABSENT`; `cleanup.enumerationComplete=true`; `cleanup.remaining=0`; `WFP_PROOF_OBJECTS_REMAINING=0`. Classification: `WFP_DYNAMIC_CLEANUP=VERIFIED_LIVE`.
+- VERIFIED scope: this receipt proves the exact-app localhost-only WFP socket boundary for the frozen `WfpEgressProbe.exe` on this Windows host. Classification: `WFP_EXACT_APP_LOCALHOST_SOCKET_BOUNDARY=VERIFIED_LIVE_FOR_WFP_EGRESS_PROBE`.
+- NOT integrated / NOT run: the receipt does not prove that `omp.exe` is actively protected during an OMP run. `OMP_ACTIVE_WFP_BOUNDARY=NOT_YET_INTEGRATED`; `REAL_OMP_RUNTIME=NOT_RUN`; `FIRST_REAL_OMP_PROOF=NOT_YET_EXECUTED`.
+- UNKNOWN retained: `DNS_SERVICE_DELEGATION_CONTAINMENT=UNKNOWN`.
+- Authority disposition: WFP authorization=`CONSUMED`; WFP rerun=`NO`; `omp.exe` execution=`NO`; OMP/WFP integration bridge=`NOT_STARTED`; provider/model contact=`NO`; external network=`NO`; elevation by this recording session=`NO`; implementation modification=`NO`; `PUSH=NO`.
+
 # 2026-09-23 WFP INDEXED flag semantics repair — REPAIRED_FOR_BFE_INDEXED_SEMANTICS_NOT_EXECUTED
 
 The Human-authorized `aHwuUH` live WFP proof remains consumed and was not rerun. Accepted remote checkpoint=`7ca635deb6d93d6e389da0403248fb03059b9178`; implementation commit=`6ed13bddaec6905a96ac02cbe96b1484c2da4063` (`fix: allow WFP indexed query flags`), tree=`8e9fe1dc1675fd2fb14328f2bc1fec12c996505d`. Exact changed implementation paths: `src/main/windowsWfpLocalhostPoc.cs` and `test/windows-wfp-localhost-poc.probe.cjs`.
